@@ -29,8 +29,8 @@ The target's embedding and lm_head are not part of the drafter's weights.
 transformers target model.
 """
 
-from dataclasses import dataclass, field
 import math
+from dataclasses import dataclass, field
 from typing import Optional
 
 import torch

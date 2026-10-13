@@ -75,8 +75,8 @@ Generation stops after `max_new_tokens` or at a stop token (default: the target'
 
 - `FlashMapCache(config, batch_size, max_length)`: the drafter's cross-attention keys and values;
 - `draft.extend_context(cache, draft.select_target_hidden(target_output.hidden_states))`: append the
-  target's hidden states at newly verified positions (projected once and cached, so the cost of a draft
-  does not grow with the context);
+  target's hidden states at newly verified positions (projected to keys and values once and cached, so a
+  draft never reprocesses the context);
 - `draft.draft(anchor_ids, cache, target.get_input_embeddings(), target.get_output_embeddings(), num_steps)`:
   the logits `(B, 16, V)` of the block after the anchor tokens.
 
