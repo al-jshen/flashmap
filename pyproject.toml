@@ -13,6 +13,7 @@ dependencies = ["torch>=2.1", "transformers>=4.56"]
 
 [project.optional-dependencies]
 benchmark = ["datasets"]
+test = ["pytest"]
 
 [project.urls]
 Homepage = "https://github.com/al-jshen/flashmap"
