@@ -43,7 +43,8 @@ print(tokenizer.decode(output.sequences[0, input_ids.shape[1]:], skip_special_to
 print("acceptance length:", output.acceptance_length)
 ```
 
-Or install this repository (`pip install -e .`) and run the examples:
+Tested with torch 2.9 and transformers 4.57 and 5.10. Or install this repository (`pip install -e .`)
+and run the examples:
 
 ```bash
 python examples/generate.py --draft al-jshen/FlashMap-Qwen3-8B --target Qwen/Qwen3-8B --prompt "..."
@@ -120,6 +121,31 @@ H200 in SGLang. The model cards in `model_cards/` have the Qwen3-4B numbers.
 
 This implementation favors readability over speed (eager PyTorch, a full-vocabulary lm_head, batch size 1);
 for serving, use the SGLang or vLLM integrations.
+
+### Checking this implementation
+
+On the same prompts, with 512 new tokens, the acceptance lengths of `spec_generate` with Qwen3-8B match those
+of DeepSpec's own evaluator (16 prompts per benchmark: the first 16 of the paper's GSM8K and HumanEval sets,
+every fifth MT-Bench question; one A100, bfloat16). The paper's numbers come from SGLang with 80 prompts and
+2048 new tokens.
+
+| T | Steps | Implementation | GSM8K | HumanEval | MT-Bench |
+|---|---|---|---|---|---|
+| 0 | 1 | this repository | 7.78 | 5.73 | 3.37 |
+| 0 | 1 | DeepSpec | 7.80 | 5.83 | 3.34 |
+| 0 | 1 | paper | 7.69 | 5.82 | 3.34 |
+| 0 | 2 | this repository | 8.54 | 6.28 | |
+| 0 | 2 | DeepSpec | 8.47 | | |
+| 0 | 2 | paper | 8.31 | 6.26 | 3.40 |
+| 1 | 1 | this repository | 6.50 | 4.80 | |
+| 1 | 1 | paper | 6.40 | 4.87 | 3.00 |
+
+With the same noise, the draft logits equal DeepSpec's to 5e-5 (one step) and 4e-4 (two steps) in float32.
+At temperature 0 the output is the target's own greedy decoding: identical on every prompt checked with the
+target in float32 (6 prompts with Qwen3-8B, 9 with Qwen3-4B, one and two steps). In bfloat16 the batched
+verification pass and token-by-token decoding round differently, so the two can part where the target's top
+two logits tie to within bfloat16 precision. `tests/` checks greedy and sampled losslessness on tiny random
+models.
 
 ## Converting DeepSpec checkpoints
 
