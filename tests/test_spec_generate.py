@@ -79,9 +79,11 @@ def test_greedy_is_target_greedy():
     target, draft = tiny_models(vocab_size=64)
     input_ids = torch.randint(64, (1, 7))
     expected = target.generate(input_ids, max_new_tokens=40, do_sample=False)
-    for num_steps in (1, 2):
-        out = draft.spec_generate(target, input_ids, max_new_tokens=40, num_steps=num_steps, stop_token_ids=[])
-        assert torch.equal(out.sequences, expected)
+    for noise_gate in ("jump", "constant"):
+        draft.config.noise_gate = noise_gate
+        for num_steps in (1, 2):
+            out = draft.spec_generate(target, input_ids, max_new_tokens=40, num_steps=num_steps, stop_token_ids=[])
+            assert torch.equal(out.sequences, expected)
 
 
 def test_greedy_with_any_number_accepted():
