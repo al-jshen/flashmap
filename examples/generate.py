@@ -31,6 +31,10 @@ def main():
         messages, add_generation_prompt=True, enable_thinking=False, return_tensors="pt", return_dict=True
     )["input_ids"].to(device)
 
+    # warm-up: CUDA kernels, the cached noise factor and time conditioning
+    draft.spec_generate(target, input_ids, max_new_tokens=16, num_steps=args.num_steps)
+    if device == "cuda":
+        torch.cuda.synchronize()
     start = time.perf_counter()
     output = draft.spec_generate(
         target,
@@ -39,6 +43,8 @@ def main():
         temperature=args.temperature,
         num_steps=args.num_steps,
     )
+    if device == "cuda":
+        torch.cuda.synchronize()
     seconds = time.perf_counter() - start
     print(tokenizer.decode(output.sequences[0, input_ids.shape[1]:], skip_special_tokens=True))
     print(

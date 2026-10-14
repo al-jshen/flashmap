@@ -16,19 +16,23 @@ A [FlashMap](https://github.com/al-jshen/flashmap) drafter for lossless speculat
 [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B).
 
 FlashMap drafts a whole block of 16 tokens in **one forward pass** of a small (0.5B) DiT, like
-[DFlash](https://github.com/z-lab/dflash), but samples the block **jointly** instead of predicting every
-position independently: the block is drawn by a distilled discrete flow map
+[DFlash](https://github.com/z-lab/dflash), but from a generative model that can couple the positions of a
+block instead of predicting each one independently: the block is drawn by a distilled flow map
 ([Flow Map Language Models](https://arxiv.org/abs/2602.16813)) that jumps from Gaussian noise to the 16
-tokens, conditioned on the target model's hidden states. One jump (1 step) is the fastest drafter; two jumps
-are a little slower and accept more tokens.
+tokens, conditioned on the target model's hidden states. One jump (1 step) is the fastest drafter but
+captures the joint structure of a block only partly; two jumps are a little slower, capture more of it and
+accept more tokens.
 
 The target verifies each block in one forward pass and keeps the longest prefix it agrees with, so the
 output is exactly what Qwen3-8B generates on its own (greedy decoding at temperature 0, the target's
-sampling distribution above it).
+sampling distribution above it). In bfloat16, greedy outputs can differ from token-by-token decoding
+where the target's top two logits tie within bfloat16 precision, since the target scores 17 tokens at once;
+with the target in float32 they are identical.
 
 ## Quick start
 
-Only `torch` and `transformers` are needed (the model code ships with the weights):
+Only `torch` and `transformers>=4.56` are needed (the model code ships with the weights). Run the drafter
+and the target on one device:
 
 ```python
 import torch
@@ -49,7 +53,8 @@ print("acceptance length:", output.acceptance_length)
 ```
 
 `num_steps=2` drafts with two jumps of the map. The drafter uses the target's token embedding and
-lm_head, so it is only valid with Qwen/Qwen3-8B. See the [GitHub repository](https://github.com/al-jshen/flashmap)
+lm_head, so it is only valid with Qwen/Qwen3-8B. It was trained on sequences of up to 4096 tokens:
+longer contexts stay lossless, but their acceptance is untested. See the [GitHub repository](https://github.com/al-jshen/flashmap)
 for the API and benchmarks.
 
 ## Results
@@ -74,8 +79,8 @@ Speedup over autoregressive decoding with Qwen3-8B (SGLang, one H200 NVL), Flash
 | 0 | 6.14x | 5.89x | 4.89x | 4.02x | 4.73x | 5.26x | 2.73x | 2.56x | 3.04x |
 | 1 | 5.12x | 4.39x | 3.56x | 3.47x | 3.95x | 3.85x | 2.44x | 2.28x | 2.30x |
 
-The transformers implementation here is written for clarity rather than speed; use the SGLang or vLLM
-integrations for serving.
+The transformers implementation here is written for clarity rather than speed; use the SGLang (SpecForge)
+and vLLM (speculators) integrations for serving (links TBD).
 
 ## Model details
 
@@ -84,6 +89,11 @@ integrations for serving.
 - Training: a flow over one-hot token blocks trained on 500K samples of
   [Open-PerfectBlend](https://huggingface.co/datasets/mlabonne/open-perfectblend), then distilled into a
   flow map with the semigroup objective of Flow Map Language Models.
+
+## License
+
+The model weights are released under Apache-2.0, following Qwen3; the model code (`*.py`, from the
+[GitHub repository](https://github.com/al-jshen/flashmap)) is under the MIT license.
 
 ## Citation
 

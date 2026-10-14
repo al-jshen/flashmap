@@ -3,8 +3,9 @@
     python examples/benchmark.py --draft al-jshen/FlashMap-Qwen3-8B --target Qwen/Qwen3-8B \
         --dataset gsm8k --num-prompts 16 --max-new-tokens 512
 
-The prompts are a Hugging Face dataset (gsm8k, humaneval, mt-bench), rendered with the
-target's chat template and thinking disabled, or a local JSONL file with one
+The prompts are the first --num-prompts rows of a Hugging Face dataset (gsm8k, humaneval,
+mt-bench; formatted as in the paper's evaluation, which sampled 80 rows of each), rendered
+with the target's chat template and thinking disabled, or a local JSONL file with one
 {"prompt": "..."} per line. The acceptance length is the mean number of tokens committed
 per target forward pass, the draft's accepted tokens plus the target's own (the paper's
 gamma). With --baseline the target also decodes every prompt on its own, which gives the
@@ -18,7 +19,7 @@ import time
 import torch
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
-# The prompts of the paper's evaluation: dataset, subset, split, user turn.
+# Dataset, subset, split, and the user turn, formatted as in the paper's evaluation.
 DATASETS = {
     "gsm8k": (
         "openai/gsm8k", "main", "test",
@@ -69,17 +70,25 @@ def main():
     target = AutoModelForCausalLM.from_pretrained(args.target, dtype=torch.bfloat16).to("cuda").eval()
     draft = AutoModel.from_pretrained(args.draft, trust_remote_code=True, dtype=torch.bfloat16).to("cuda").eval()
     generator = torch.Generator(device="cuda").manual_seed(args.seed)
+    prompts = load_prompts(args.dataset, args.num_prompts)
 
-    committed = rounds = new_tokens = base_tokens = matches = 0
-    spec_seconds = base_seconds = 0.0
-    for prompt in load_prompts(args.dataset, args.num_prompts):
-        input_ids = tokenizer.apply_chat_template(
+    def encode(prompt):
+        return tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
             add_generation_prompt=True,
             enable_thinking=False,
             return_tensors="pt",
             return_dict=True,
         )["input_ids"].to("cuda")
+
+    # warm-up: CUDA kernels, the cached noise factor and time conditioning
+    draft.spec_generate(target, encode(prompts[0]), max_new_tokens=32, num_steps=args.num_steps)
+    target.generate(encode(prompts[0]), max_new_tokens=8, do_sample=False)
+
+    committed = rounds = new_tokens = base_tokens = matches = 0
+    spec_seconds = base_seconds = 0.0
+    for prompt in prompts:
+        input_ids = encode(prompt)
         output, seconds = timed(
             lambda: draft.spec_generate(
                 target,
@@ -110,13 +119,13 @@ def main():
             base_seconds += seconds
             matches += torch.equal(baseline, output.sequences)
 
-    print(f"{args.dataset}: {args.num_prompts} prompts, {new_tokens} tokens, T={args.temperature}, steps={args.num_steps}")
-    print(f"acceptance length {committed / rounds:.2f}, {new_tokens / spec_seconds:.1f} tok/s")
+    print(f"{args.dataset}: {len(prompts)} prompts, {new_tokens} tokens, T={args.temperature}, steps={args.num_steps}")
+    print(f"acceptance length {committed / max(rounds, 1):.2f}, {new_tokens / spec_seconds:.1f} tok/s")
     if args.baseline:
         base_speed = base_tokens / base_seconds
         print(f"target alone {base_speed:.1f} tok/s, speedup {new_tokens / spec_seconds / base_speed:.2f}x")
         if args.temperature == 0:
-            print(f"identical to the target's greedy decoding: {matches}/{args.num_prompts} prompts")
+            print(f"identical to the target's greedy decoding: {matches}/{len(prompts)} prompts")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,10 @@
 """Convert a DeepSpec flow-map checkpoint into a FlashMap release folder.
 
-DeepSpec (github.com/deepseek-ai/DeepSpec, where FlashMap was trained under the
-name "DFlashier flow map") saves the drafter together with frozen copies of the
-target's embedding and lm_head. The release keeps only the drafter's own weights,
-renamed to the FlashMap modules, and loads the rest from the target at runtime:
+FlashMap was trained under the name "DFlashier flow map" in a fork of DeepSpec
+(github.com/al-jshen/DeepSpec; upstream github.com/deepseek-ai/DeepSpec), which saves
+the drafter together with frozen copies of the target's embedding and lm_head. The
+release keeps only the drafter's own weights, renamed to the FlashMap modules, and
+loads the rest from the target at runtime:
 
     python scripts/convert_deepspec_checkpoint.py \
         --checkpoint <deepspec run>/step_23268 --target-model Qwen/Qwen3-8B \
