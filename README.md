@@ -21,7 +21,10 @@ not included.
 | [al-jshen/FlashMap-Qwen3-8B](https://huggingface.co/al-jshen/FlashMap-Qwen3-8B) | [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) | 500M |
 | [al-jshen/FlashMap-Qwen3-4B](https://huggingface.co/al-jshen/FlashMap-Qwen3-4B) | [Qwen/Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) | 475M |
 
-The drafters use the target's token embedding and lm_head, which are not part of their weights. They were
+The drafters use the target's token embedding and lm_head, which are not part of their weights. Each
+model folder also has `draft_vocab.safetensors`, the target's response tokens ranked by frequency; this
+implementation does not need it, and the serving integrations use its top 65,536 tokens as a smaller draft
+head. They were
 trained on sequences of up to 4096 tokens: longer contexts stay lossless, but their acceptance is untested.
 
 ## Quick start
@@ -46,8 +49,8 @@ print(tokenizer.decode(output.sequences[0, input_ids.shape[1]:], skip_special_to
 print("acceptance length:", output.acceptance_length)
 ```
 
-Run the drafter, the target and its embedding and lm_head on one device. Tested with torch 2.9 and
-transformers 4.57 and 5.10 (`transformers>=4.56` is needed for the `dtype` argument). The examples load the
+Run the drafter, the target and its embedding and lm_head on one device. Tested with transformers 4.57,
+5.10 and 5.16 and torch 2.9 and 2.13 (`transformers>=4.56` is needed for the `dtype` argument). The examples load the
 model code from the checkpoint too, so they run without installing this repository:
 
 ```bash
@@ -139,39 +142,55 @@ for serving, use the SGLang (SpecForge) and vLLM (speculators) integrations (lin
 
 ### Checking this implementation
 
-On the same prompts, with 512 new tokens, the acceptance lengths of `spec_generate` with Qwen3-8B match those
-of DeepSpec's own evaluator (16 prompts per benchmark: the first 16 of the paper's GSM8K and HumanEval sets,
-every fifth MT-Bench question; one A100, bfloat16). The paper's numbers come from SGLang with 80 prompts and
-2048 new tokens.
+On the same prompts, with 512 new tokens, the acceptance lengths of `spec_generate` match those of DeepSpec's
+own evaluator (16 prompts per benchmark: the first 16 of the paper's GSM8K and HumanEval sets, every fifth
+MT-Bench question; one H100, bfloat16). The paper's numbers come from SGLang with 80 prompts and 2048 new
+tokens. Even at T = 0 the drafts depend on the draft noise, and with 16 prompts two runs differ by up to
+about 0.3.
 
-| T | Steps | Implementation | GSM8K | HumanEval | MT-Bench |
-|---|---|---|---|---|---|
-| 0 | 1 | this repository | 7.78 | 5.73 | 3.37 |
-| 0 | 1 | DeepSpec | 7.80 | 5.83 | 3.34 |
-| 0 | 1 | paper | 7.69 | 5.82 | 3.34 |
-| 0 | 2 | this repository | 8.54 | 6.28 | |
-| 0 | 2 | DeepSpec | 8.47 | | |
-| 0 | 2 | paper | 8.31 | 6.26 | 3.40 |
-| 1 | 1 | this repository | 6.50 | 4.80 | |
-| 1 | 1 | paper | 6.40 | 4.87 | 3.00 |
+| Target | T | Steps | Implementation | GSM8K | HumanEval | MT-Bench |
+|---|---|---|---|---|---|---|
+| Qwen3-8B | 0 | 1 | this repository | 7.82 | 5.74 | 3.39 |
+| | | | DeepSpec | 7.88 | 5.75 | 3.42 |
+| | | | paper | 7.69 | 5.82 | 3.34 |
+| | 0 | 2 | this repository | 8.43 | 6.12 | 3.56 |
+| | | | DeepSpec | 8.34 | 6.03 | 3.50 |
+| | | | paper | 8.31 | 6.26 | 3.40 |
+| | 1 | 1 | this repository | 6.34 | 5.08 | 2.95 |
+| | | | DeepSpec | 6.23 | 4.94 | 2.96 |
+| | | | paper | 6.40 | 4.87 | 3.00 |
+| Qwen3-4B | 0 | 1 | this repository | 7.30 | 5.62 | 3.32 |
+| | | | DeepSpec | 7.05 | 5.69 | 3.30 |
+| | | | paper | 7.24 | 5.62 | 3.40 |
+| | 0 | 2 | this repository | 7.88 | 6.27 | 3.39 |
+| | | | DeepSpec | 7.76 | 6.17 | 3.38 |
+| | | | paper | 7.79 | 6.10 | 3.49 |
+| | 1 | 1 | this repository | 6.42 | 5.15 | 3.12 |
+| | | | DeepSpec | 6.53 | 5.39 | 3.05 |
+| | | | paper | 6.45 | 5.12 | 3.12 |
 
-With the same noise, the draft logits equal DeepSpec's to 5e-5 (one step) and 4e-4 (two steps) in float32.
-At temperature 0 the output is the target's own greedy decoding: identical on every prompt checked with the
-target in float32 (6 prompts with Qwen3-8B, 9 with Qwen3-4B, one and two steps). In bfloat16 the batched
-verification pass and token-by-token decoding round differently, so the two can part where the target's top
-two logits tie to within bfloat16 precision. `tests/` checks greedy and sampled losslessness on tiny random
-models.
+With the same noise, the draft logits equal DeepSpec's exactly in bfloat16 (on the H100) and to 5e-5 (one
+step) and 9e-4 (two steps) in float32. At temperature 0 the output is the target's own greedy decoding:
+identical on every prompt checked with the target in float32 (6 prompts with Qwen3-8B, 9 with Qwen3-4B, one
+and two steps). In bfloat16 the batched verification pass and token-by-token decoding round differently, so
+the two can part where the target's top two logits tie to within bfloat16 precision. `tests/` checks greedy
+and sampled losslessness on tiny random models.
 
-## Converting DeepSpec checkpoints
+A draft takes 6.4 ms with one step and 11.3 ms with two (H100, eager PyTorch, Qwen3-8B); `spec_generate`
+decodes GSM8K answers at 235 tokens/s with one step against 51 tokens/s for the target alone.
+
+## Training and converting checkpoints
 
 FlashMap was trained in [a fork of DeepSpec](https://github.com/al-jshen/DeepSpec) (upstream:
-[deepseek-ai/DeepSpec](https://github.com/deepseek-ai/DeepSpec)). `scripts/convert_deepspec_checkpoint.py`
-turns a DeepSpec flow-map checkpoint into a release folder (config, weights without the target's
-embedding and lm_head, the model code and a model card) and checks every converted tensor against the
-source:
+[deepseek-ai/DeepSpec](https://github.com/deepseek-ai/DeepSpec)); it can also be trained with speculators
+(vLLM) or SpecForge (SGLang). Train with any of them, then convert for standalone use:
+`scripts/convert_checkpoint.py` recognizes DeepSpec checkpoints, speculators checkpoints and SpecForge's
+`specforge export --to hf` folders, and writes a release folder (config, weights without the target's
+embedding and lm_head, the model code and, optionally, a model card and the draft-vocabulary ranking). It
+checks the weights against the source and against the names and shapes the model expects.
 
 ```bash
-python scripts/convert_deepspec_checkpoint.py --checkpoint <run>/step_23268 --target-model Qwen/Qwen3-8B \
+python scripts/convert_checkpoint.py --checkpoint <run>/step_23268 --target-model Qwen/Qwen3-8B \
     --output FlashMap-Qwen3-8B --model-card model_cards/FlashMap-Qwen3-8B.md
 ```
 

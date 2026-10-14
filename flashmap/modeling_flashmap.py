@@ -346,7 +346,9 @@ class FlashMapDraftModel(PreTrainedModel):
 
     def mix_state(self, posterior_embeds, state_embeds, s: float, t: float) -> torch.Tensor:
         """``embed_state`` from the state's two projections onto the embedding."""
-        gate = (self.noise_gate.float() * (t - s)).to(self.dtype)
+        # the noise term's weight: noise_gate times the jump ("jump") or alone ("constant")
+        jump = 1.0 if self.config.noise_gate == "constant" else t - s
+        gate = (self.noise_gate.float() * jump).to(self.dtype)
         posterior_term = self.state_norm(posterior_embeds.to(self.dtype))
         return posterior_term + gate * self.noise_norm(state_embeds.to(self.dtype))
 

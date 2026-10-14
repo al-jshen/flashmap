@@ -44,8 +44,9 @@ class FlashMapConfig(PretrainedConfig):
         rms_norm_eps (`float`): Epsilon of the context, anchor and state RMSNorms.
         qk_norm_eps (`float`): Epsilon of the query/key RMSNorms.
         layer_norm_eps (`float`): Epsilon of the adaptive LayerNorms.
-        noise_gate (`str`): How the noise term of the state embedding is weighted;
-            "jump" weighs it by `noise_gate * (t - s)` for a jump from `s` to `t`.
+        noise_gate (`str`): How the noise term of the state embedding is weighted:
+            "jump" by `noise_gate * (t - s)` for a jump from `s` to `t`, "constant" by
+            `noise_gate` alone.
         time_schedule (`str`): The schedule the jump grids come from.
         num_steps (`int`): Default number of jumps per draft.
         jump_grids (`dict[str, list[float]]`): Jump times for each number of steps.

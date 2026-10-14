@@ -82,6 +82,15 @@ Speedup over autoregressive decoding with Qwen3-4B (SGLang, one H200 NVL), Flash
 The transformers implementation here is written for clarity rather than speed; use the SGLang (SpecForge)
 and vLLM (speculators) integrations for serving (links TBD).
 
+## Files
+
+- `model.safetensors`, `config.json`: the drafter (bf16), without the target's embedding and lm_head.
+- `configuration_flashmap.py`, `modeling_flashmap.py`: the model code `trust_remote_code` loads.
+- `draft_vocab.safetensors` (optional): Qwen3-4B's response tokens ranked by frequency (`ids`, most
+  frequent first, and their `counts`, from 50K training samples). The code here does not use it; the SGLang
+  and vLLM integrations draft over its top 65,536 tokens, a smaller output head that is 2-3% faster with no
+  measurable change in acceptance.
+
 ## Model details
 
 - Target: Qwen/Qwen3-4B (hidden states of layers 1, 9, 17, 25 and 33; token embedding and lm_head, which Qwen3-4B ties).
