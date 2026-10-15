@@ -1,7 +1,7 @@
 # FlashMap: API, internals and checks
 
 The details behind the [README](../README.md): the API of the `transformers` implementation, how the drafter
-works, the paper's acceptance lengths, how this implementation was checked, and how to convert checkpoints.
+works, how this implementation was checked, serving with vLLM, and how to convert checkpoints.
 
 ## Using the drafter
 
@@ -26,6 +26,10 @@ python -m pytest tests   # CPU tests on tiny random models
 With the package installed, `import flashmap` registers FlashMap with `AutoModel`, which then loads FlashMap
 folders without `trust_remote_code`. The package is tested with transformers 4.57, 5.10 and 5.16 and torch
 2.9 and 2.13 (`transformers>=4.56` is needed for the `dtype` argument).
+
+This implementation favors readability over speed (eager PyTorch, a full-vocabulary lm_head, batch size 1).
+For serving, use the SGLang (SpecForge) integration in the [README](../README.md) or vLLM with
+`flashmap[vllm]` ([Serving with vLLM](#serving-with-vllm)).
 
 ## API
 
@@ -84,71 +88,12 @@ The network (`flashmap/modeling_flashmap.py`) is a 6-block DiT of width 2048:
   embedding of the anchor token. Their keys and values are computed once per verified token and cached.
 - **Output.** A linear head maps back to the target's hidden size, and the target's lm_head gives the logits.
 
-## Results from the paper
-
-Qwen3-8B with thinking disabled, in SGLang on one H200 NVL, at concurrency 1 with 2048 new tokens and 80
-prompts per benchmark. DFlash is retrained on the same data as FlashMap; EAGLE-3 drafts 16 tokens.
-
-Speedup over the target alone:
-
-| T | Drafter | GSM8K | MATH | AIME25 | MBPP | HumanEval | LCB | MT-Bench | Alpaca | Arena-Hard |
-|---|---|---|---|---|---|---|---|---|---|---|
-| 0 | EAGLE-3 | 3.20 | 3.09 | 2.82 | 2.57 | 2.87 | 2.90 | 1.80 | 1.78 | 1.92 |
-| 0 | DFlash | 5.77 | 5.59 | 4.67 | 3.74 | 4.50 | 4.88 | 2.48 | 2.34 | 2.67 |
-| 0 | FlashMap, 1 step | **6.14** | **5.89** | **4.89** | **4.02** | **4.73** | **5.26** | **2.73** | **2.56** | **3.04** |
-| 0 | FlashMap, 2 steps | 5.89 | 5.57 | 4.61 | 3.79 | 4.53 | 5.06 | 2.47 | 2.33 | 2.76 |
-| 1 | EAGLE-3 | 2.94 | 2.69 | 2.24 | 2.37 | 2.53 | 2.51 | 1.66 | 1.57 | 1.55 |
-| 1 | DFlash | 4.89 | 4.24 | 3.23 | 3.42 | 3.82 | 3.54 | 2.24 | 2.06 | 2.05 |
-| 1 | FlashMap, 1 step | **5.12** | **4.39** | **3.56** | **3.47** | **3.95** | **3.85** | **2.44** | **2.28** | **2.30** |
-| 1 | FlashMap, 2 steps | 5.07 | 4.15 | 3.28 | 3.43 | 3.86 | 3.57 | 2.29 | 2.14 | 2.14 |
-
-Acceptance length (tokens per target forward pass):
-
-| T | Drafter | GSM8K | MATH | AIME25 | MBPP | HumanEval | LCB | MT-Bench | Alpaca | Arena-Hard |
-|---|---|---|---|---|---|---|---|---|---|---|
-| 0 | EAGLE-3 | 6.75 | 6.43 | 5.96 | **5.38** | 6.04 | 6.16 | **3.75** | **3.71** | **3.97** |
-| 0 | DFlash | 7.43 | 7.09 | 5.92 | 4.77 | 5.74 | 6.35 | 3.14 | 2.96 | 3.38 |
-| 0 | FlashMap, 1 step | 7.69 | 7.24 | 6.00 | 4.95 | 5.82 | 6.65 | 3.34 | 3.14 | 3.71 |
-| 0 | FlashMap, 2 steps | **8.31** | **7.69** | **6.36** | 5.24 | **6.26** | **7.19** | 3.40 | 3.20 | 3.80 |
-| 1 | EAGLE-3 | 6.15 | 5.55 | **4.61** | **4.94** | 5.29 | **5.37** | **3.43** | **3.25** | **3.20** |
-| 1 | DFlash | 6.30 | 5.40 | 4.10 | 4.37 | 4.88 | 4.62 | 2.85 | 2.62 | 2.61 |
-| 1 | FlashMap, 1 step | 6.40 | 5.40 | 4.37 | 4.29 | 4.87 | 4.90 | 3.00 | 2.81 | 2.83 |
-| 1 | FlashMap, 2 steps | **7.11** | **5.74** | 4.52 | 4.75 | **5.35** | 5.06 | 3.16 | 2.96 | 2.95 |
-
-EAGLE-3 drafts one token per forward pass, so its higher acceptance on some benchmarks costs more drafting
-time than a block drafter's. The model cards in [`model_cards/`](../model_cards/) have the Qwen3-4B numbers.
-
-This implementation favors readability over speed (eager PyTorch, a full-vocabulary lm_head, batch size 1).
-For serving, use the SGLang (SpecForge) or vLLM (speculators) integration in the [README](../README.md).
-
 ## Checking this implementation
 
-On the same prompts, with 512 new tokens, the acceptance lengths of `spec_generate` match those of DeepSpec's
-own evaluator (16 prompts per benchmark: the first 16 of the paper's GSM8K and HumanEval sets, every fifth
-MT-Bench question; one H100, bfloat16). The paper's numbers come from SGLang with 80 prompts and 2048 new
-tokens. Even at T = 0 the drafts depend on the draft noise, and with 16 prompts two runs differ by up to
-about 0.3.
-
-| Target | T | Steps | Implementation | GSM8K | HumanEval | MT-Bench |
-|---|---|---|---|---|---|---|
-| Qwen3-8B | 0 | 1 | this repository | 7.82 | 5.74 | 3.39 |
-| | | | DeepSpec | 7.88 | 5.75 | 3.42 |
-| | | | paper | 7.69 | 5.82 | 3.34 |
-| | 0 | 2 | this repository | 8.43 | 6.12 | 3.56 |
-| | | | DeepSpec | 8.34 | 6.03 | 3.50 |
-| | | | paper | 8.31 | 6.26 | 3.40 |
-| | 1 | 1 | this repository | 6.34 | 5.08 | 2.95 |
-| | | | DeepSpec | 6.23 | 4.94 | 2.96 |
-| | | | paper | 6.40 | 4.87 | 3.00 |
-| Qwen3-4B | 0 | 1 | this repository | 7.30 | 5.62 | 3.32 |
-| | | | DeepSpec | 7.05 | 5.69 | 3.30 |
-| | | | paper | 7.24 | 5.62 | 3.40 |
-| | 0 | 2 | this repository | 7.88 | 6.27 | 3.39 |
-| | | | DeepSpec | 7.76 | 6.17 | 3.38 |
-| | | | paper | 7.79 | 6.10 | 3.49 |
-| | 1 | 1 | this repository | 6.42 | 5.15 | 3.12 |
-| | | | DeepSpec | 6.53 | 5.39 | 3.05 |
-| | | | paper | 6.45 | 5.12 | 3.12 |
+On the same prompts, the acceptance lengths of `spec_generate` match those of DeepSpec's own evaluator, for
+both drafters, one and two steps, at T = 0 and T = 1 (512 new tokens; the first 16 prompts of the paper's
+GSM8K and HumanEval sets and every fifth MT-Bench question; one H100, bfloat16). Even at T = 0 the drafts
+depend on the draft noise, so two runs on 16 prompts differ slightly.
 
 With the same noise, the draft logits equal DeepSpec's exactly in bfloat16 (on the H100) and to 5e-5 (one
 step) and 9e-4 (two steps) in float32. At temperature 0 the output is the target's own greedy decoding:
@@ -157,17 +102,63 @@ and two steps). In bfloat16 the batched verification pass and token-by-token dec
 the two can part where the target's top two logits tie to within bfloat16 precision. `tests/` checks greedy
 and sampled losslessness on tiny random models.
 
-A draft takes 6.4 ms with one step and 11.3 ms with two (H100, eager PyTorch, Qwen3-8B); `spec_generate`
-decodes GSM8K answers at 235 tokens/s with one step against 51 tokens/s for the target alone.
+## Serving with vLLM
+
+`flashmap[vllm]` installs `flashmap.vllm`, a vLLM general plugin (entry point group `vllm.general_plugins`,
+name `flashmap`) that vLLM loads in each of its processes. Without changing vLLM, it adds the
+`FlashMapDraftModel` architecture and the speculator that runs it on vLLM's DFlash runtime, and it serves a
+release folder, local or on the Hub, as it is:
+
+```bash
+uv pip install "vllm==0.31.*" "flashmap[vllm] @ git+https://github.com/al-jshen/flashmap"
+vllm serve Qwen/Qwen3-8B --speculative-config '{"model": "j-shen/FlashMap-Qwen3-8B", "num_speculative_tokens": 16}'
+```
+
+- Requirements: vLLM 0.31.x (on other versions the plugin logs a warning and leaves vLLM untouched), vLLM's
+  V2 model runner (the default), tensor parallelism 1, the FlashAttention backend and a bf16 target. Each is
+  checked when the drafter loads.
+- The plugin fills in `"method": "dflash"` (FlashMap runs on vLLM's DFlash runtime) and, when it is left out,
+  `num_speculative_tokens` (the block size, 16). A smaller `num_speculative_tokens` verifies only the first
+  drafts of each block, which can pay off at high concurrency.
+- `vllm serve j-shen/FlashMap-Qwen3-8B` also works: vLLM then serves the target named in the drafter's
+  config.
+- vLLM's prefix caching (on by default) works as usual.
+- The draft head covers the first `draft_vocab_size` (65,536) tokens of `draft_vocab.safetensors`; the
+  target still verifies every token, so outputs are unchanged. Without `draft_vocab_size` in config.json,
+  the drafter drafts over the full vocabulary.
+- For sampling at `temperature > 0`, add `"draft_sample_method": "probabilistic"`, so that drafts are sampled
+  from FlashMap's distribution and verified against it.
+- `FLASHMAP_NUM_STEPS=2` in the server's environment drafts with two jumps (higher acceptance, slower
+  drafts); `FLASHMAP_FP8=1` keeps FP8 copies of the draft's large weights (Ada or Hopper; opt-in, as it does
+  not speed up every batch size).
+- `"kv_cache_dtype": "fp8_e4m3"` in the speculative config stores the draft's KV cache in FP8 (Hopper,
+  FlashAttention 3), which leaves more memory for the target's KV cache.
+
+The plugin reads these config.json fields, which `scripts/convert_checkpoint.py` writes next to the
+model's own:
+
+| Field | Value | Use |
+| --- | --- | --- |
+| `speculators_model_type` | `"flashmap"` | marks a vLLM draft model in the speculators format |
+| `speculators_config` | algorithm, proposal (16 greedy tokens), verifier (the target) | the defaults `vllm serve <folder>` serves with |
+| `transformer_layer_config` | `{}` | required by vLLM's format; the plugin reads the DiT's sizes from the top-level fields |
+| `draft_vocab_size` | `65536` | size of the draft head's vocabulary, taken from `draft_vocab.safetensors` |
+
+The same plugin lives in [our speculators fork](https://github.com/al-jshen/speculators/tree/flashmap)
+(`speculators.models.flashmap.vllm`), which trains FlashMap and is where the integration would be upstreamed
+to vLLM from. That copy also serves speculators checkpoints (`speculators convert`, for another draft
+vocabulary or a DeepSpec checkpoint); its
+[vLLM guide](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap.md)
+has the implementation notes. Both register under the plugin name `flashmap`, so install one of them.
 
 ## Converting checkpoints
 
 FlashMap was first trained in a fork of [DeepSpec](https://github.com/deepseek-ai/DeepSpec), and it can also
 be trained with speculators (vLLM) or SpecForge (SGLang); see [Training](../README.md#training).
 `scripts/convert_checkpoint.py` recognizes DeepSpec checkpoints, speculators checkpoints and SpecForge's
-`specforge export --to hf` folders, and writes a release folder for this package: the config, the weights
-without the target's embedding and lm_head, the model code and, optionally, a model card and the
-draft-vocabulary ranking. It checks the weights against the source and against the names and shapes the
+`specforge export --to hf` folders, and writes a release folder for this package: the config (with the
+[fields vLLM serves it with](#serving-with-vllm)), the weights without the target's embedding and lm_head,
+the model code and, optionally, a model card and the draft-vocabulary ranking. It checks the weights against the source and against the names and shapes the
 model expects.
 
 ```bash

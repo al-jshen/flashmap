@@ -28,8 +28,8 @@ source .venv/bin/activate
 uv pip install git+https://github.com/al-jshen/flashmap
 ```
 
-The package needs only `torch` and `transformers>=4.56`. It is tested with torch 2.9 and 2.13 and with
-transformers 4.57, 5.10 and 5.16.
+The package needs only `torch` and `transformers>=4.56`; serving with vLLM takes the `vllm` extra (below). It
+is tested with torch 2.9 and 2.13 and with transformers 4.57, 5.10 and 5.16.
 
 ## Quickstart
 
@@ -85,42 +85,35 @@ python -m sglang.launch_server \
 
 Set `FLASHMAP_NUM_STEPS=2` when launching to draft with two jumps. The
 [SGLang guide](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/basic_usage/flashmap_sglang.md)
-covers the options, tree drafting and the full benchmarks.
+covers the options and tree drafting.
 
 ## Serve with vLLM
 
-The vLLM integration is a plugin in [our speculators fork](https://github.com/al-jshen/speculators/tree/flashmap),
-which vLLM loads automatically, so vLLM itself is unchanged. It needs vLLM 0.31.x, tensor parallelism 1 and
-vLLM's FlashAttention backend; each requirement is checked when the drafter loads.
+The `vllm` extra adds a plugin that vLLM loads automatically, so vLLM itself is unchanged and the release
+checkpoint is served as it is. It needs vLLM 0.31.x, tensor parallelism 1 and vLLM's FlashAttention backend;
+each requirement is checked when the drafter loads.
 
 ```bash
 uv venv --python 3.12 .venv-vllm
 source .venv-vllm/bin/activate
-uv pip install "vllm==0.31.*" "git+https://github.com/al-jshen/speculators@flashmap"
+uv pip install "vllm==0.31.*" "flashmap[vllm] @ git+https://github.com/al-jshen/flashmap"
 
-# Convert the release checkpoint to the speculators format (64k-token draft vocabulary by default)
-hf download j-shen/FlashMap-Qwen3-8B --local-dir FlashMap-Qwen3-8B
-speculators convert ./FlashMap-Qwen3-8B --algorithm flashmap --verifier Qwen/Qwen3-8B \
-    --output-path ./FlashMap-Qwen3-8B-speculators
-
-vllm serve ./FlashMap-Qwen3-8B-speculators
+vllm serve Qwen/Qwen3-8B --speculative-config '{"model": "j-shen/FlashMap-Qwen3-8B", "num_speculative_tokens": 16}'
 ```
 
-For sampling at `temperature > 0`, pass the speculative config explicitly, so that drafts are sampled from
-FlashMap's own distribution:
+The drafter uses its 64k-token draft vocabulary by default. For sampling at `temperature > 0`, add
+`"draft_sample_method": "probabilistic"` to the speculative config, so that drafts are sampled from
+FlashMap's own distribution. [Serving with vLLM](docs/details.md#serving-with-vllm) covers the options.
 
-```bash
-vllm serve Qwen/Qwen3-8B --speculative-config '{"model": "./FlashMap-Qwen3-8B-speculators",
-    "method": "dflash", "num_speculative_tokens": 16, "draft_sample_method": "probabilistic"}'
-```
-
-The [vLLM guide](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap.md)
-covers the requirements, options and full benchmarks.
+The same plugin lives in [our speculators fork](https://github.com/al-jshen/speculators/tree/flashmap), which
+trains FlashMap and is where the integration would be upstreamed to vLLM from
+([vLLM guide](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap.md)).
+Serving needs only `flashmap[vllm]`.
 
 ### Sending requests
 
-Both servers expose an OpenAI-compatible API, SGLang on port 30000 and vLLM on port 8000. The results below
-were measured with Qwen3's thinking mode turned off.
+Both servers expose an OpenAI-compatible API, SGLang on port 30000 and vLLM on port 8000. The example turns
+Qwen3's thinking mode off.
 
 ```python
 from openai import OpenAI
@@ -135,7 +128,6 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-
 ## Training
 
 FlashMap is trained in two stages: a flow over one-hot token blocks, then a flow map distilled from it. The
@@ -144,8 +136,6 @@ recipes are in the speculators fork
 and the SpecForge fork ([FlashMap](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/concepts/FlashMap.md)).
 [`scripts/convert_checkpoint.py`](scripts/convert_checkpoint.py) turns a trained checkpoint into a release
 folder for this package ([details](docs/details.md#converting-checkpoints)).
-
-
 
 ## License
 

@@ -77,40 +77,16 @@ python -m sglang.launch_server --model-path Qwen/Qwen3-4B \
   --speculative-dspark-block-size 16 --max-running-requests 32 --cuda-graph-max-bs-decode 32
 ```
 
-vLLM 0.31.x, with [our speculators fork](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap.md):
+vLLM 0.31.x, with the [vLLM plugin](https://github.com/al-jshen/flashmap/blob/master/docs/details.md#serving-with-vllm)
+of the flashmap package, which serves this folder as it is:
 
 ```bash
-uv pip install "vllm==0.31.*" "git+https://github.com/al-jshen/speculators@flashmap"
-hf download j-shen/FlashMap-Qwen3-4B --local-dir FlashMap-Qwen3-4B
-speculators convert ./FlashMap-Qwen3-4B --algorithm flashmap --verifier Qwen/Qwen3-4B \
-    --output-path ./FlashMap-Qwen3-4B-speculators
-vllm serve ./FlashMap-Qwen3-4B-speculators
+uv pip install "vllm==0.31.*" "flashmap[vllm] @ git+https://github.com/al-jshen/flashmap"
+vllm serve Qwen/Qwen3-4B --speculative-config '{"model": "j-shen/FlashMap-Qwen3-4B", "num_speculative_tokens": 16}'
 ```
 
-Use a separate environment for each engine. The linked guides cover sampling at temperature > 0, two-jump
-drafting and benchmarks.
-
-## Results
-
-Acceptance length (mean tokens committed per target forward pass, including the target's own token),
-Qwen3-4B, thinking disabled, measured in SGLang at concurrency 1 with 2048 new tokens on 80 prompts per
-benchmark. DFlash is retrained on the same 500K samples of Open-PerfectBlend with the same settings.
-
-| T | Drafter | GSM8K | MATH | AIME25 | MBPP | HumanEval | LCB | MT-Bench | Alpaca | Arena-Hard |
-|---|---|---|---|---|---|---|---|---|---|---|
-| 0 | DFlash | 7.18 | 7.13 | 6.20 | 5.11 | 5.47 | 5.96 | 3.30 | 3.10 | 3.50 |
-| 0 | FlashMap, 1 step | 7.24 | 6.97 | 6.20 | 5.18 | 5.62 | 6.09 | 3.40 | 3.17 | 3.67 |
-| 0 | FlashMap, 2 steps | 7.79 | 7.39 | 6.47 | 5.56 | 6.10 | 6.40 | 3.49 | 3.23 | 3.77 |
-| 1 | DFlash | 6.46 | 5.40 | 4.46 | 4.47 | 5.02 | 4.51 | 2.95 | 2.94 | 2.75 |
-| 1 | FlashMap, 1 step | 6.45 | 5.28 | 4.33 | 4.55 | 5.12 | 4.59 | 3.12 | 2.82 | 2.99 |
-| 1 | FlashMap, 2 steps | 7.09 | 5.74 | 4.50 | 4.89 | 5.66 | 4.79 | 3.13 | 2.95 | 3.05 |
-
-Speedup over autoregressive decoding with Qwen3-4B (SGLang, one H200 NVL), FlashMap with 1 step:
-
-| T | GSM8K | MATH | AIME25 | MBPP | HumanEval | LCB | MT-Bench | Alpaca | Arena-Hard |
-|---|---|---|---|---|---|---|---|---|---|
-| 0 | 5.14x | 5.02x | 4.47x | 3.71x | 4.04x | 4.28x | 2.46x | 2.28x | 2.66x |
-| 1 | 4.59x | 3.81x | 3.12x | 3.26x | 3.69x | 3.24x | 2.25x | 2.04x | 2.17x |
+Use a separate environment for each engine. The linked guides cover the options, such as sampling at
+temperature > 0 and two-jump drafting.
 
 ## Files
 
@@ -118,8 +94,7 @@ Speedup over autoregressive decoding with Qwen3-4B (SGLang, one H200 NVL), Flash
 - `configuration_flashmap.py`, `modeling_flashmap.py`: the model code `trust_remote_code` loads.
 - `draft_vocab.safetensors` (optional): Qwen3-4B's response tokens ranked by frequency (`ids`, most
   frequent first, and their `counts`, from 50K training samples). The code here does not use it; the SGLang
-  and vLLM integrations draft over its top 65,536 tokens, a smaller output head that is 2-3% faster with no
-  measurable change in acceptance.
+  and vLLM integrations draft over its top 65,536 tokens, a smaller output head.
 
 ## Model details
 
