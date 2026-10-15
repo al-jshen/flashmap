@@ -223,6 +223,14 @@ def _register() -> None:
 
     algos.SUPPORTED_SPECULATORS_TYPES["flashmap"] = update_flashmap
 
+    from vllm.transformers_utils import config as config_utils  # noqa: PLC0415
+
+    # vLLM reads a config.json as a speculators checkpoint only when it has no
+    # model_type; a release folder's is "flashmap" (for transformers), so route
+    # that model_type the same way: SpeculatorsConfig, through update_flashmap.
+    config_utils._CONFIG_REGISTRY.setdefault("flashmap", "SpeculatorsConfig")  # noqa: SLF001
+    config_utils._SPECULATIVE_DECODING_CONFIGS.add("flashmap")  # noqa: SLF001
+
     build = base.SpeculatorsConfig.build_vllm_speculative_config
     if not getattr(build, "flashmap", False):
         # FlashMap runs on vLLM's DFlash runtime.

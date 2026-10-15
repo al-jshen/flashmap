@@ -35,3 +35,22 @@ def test_register_is_idempotent_and_hooks_vllm():
         "method": "dflash",
         "num_speculative_tokens": 16,
     }
+
+
+def test_release_folder_reads_as_speculators_config(tmp_path):
+    """vLLM parses a release folder's config.json (model_type "flashmap") into the
+    speculators draft config that update_flashmap fills in."""
+    if _vllm_version() not in SUPPORTED_VLLM:
+        pytest.skip(f"vLLM {vllm.__version__} is not supported by the plugin")
+    import json
+
+    from test_vllm_plugin import release_config
+    from vllm.transformers_utils.config import get_config
+
+    register()
+    (tmp_path / "config.json").write_text(json.dumps(release_config()))
+    config = get_config(str(tmp_path), trust_remote_code=False)
+    assert isinstance(config, base.SpeculatorsConfig) and config.model_type == "speculators"
+    assert config.architectures == [FLASHMAP_ARCHITECTURE]
+    assert config.draft_vocab_size == 65536 and config.hidden_size == 2048
+    assert config.dflash_config["target_layer_ids"] == [1, 9, 17, 25, 33]
