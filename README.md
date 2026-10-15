@@ -7,8 +7,7 @@ proposes a whole block of 16 tokens in one forward pass of a small network condi
 hidden states. Unlike DFlash, which predicts each token of the block independently, FlashMap draws the block
 from a flow map ([Flow Map Language Models](https://arxiv.org/abs/2602.16813)), which jumps from Gaussian
 noise to the whole block in a single step and can capture dependencies between its tokens. The target model
-verifies every block, so the output is exactly the target's own. On Qwen3-8B, FlashMap decodes up to 6x faster
-than the target alone.
+verifies every block, so the output is exactly the target's own.
 
 This repository is a small, standalone implementation for Hugging Face `transformers`. For fast serving, use
 the [SGLang](#serve-with-sglang) or [vLLM](#serve-with-vllm) integration.
