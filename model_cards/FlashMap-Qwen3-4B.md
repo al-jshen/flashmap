@@ -12,6 +12,8 @@ tags:
 
 # FlashMap-Qwen3-4B
 
+**[Project page](https://jshen.net/flashmap)** · **[Code](https://github.com/al-jshen/flashmap)** · **Paper** (coming soon)
+
 A [FlashMap](https://github.com/al-jshen/flashmap) drafter for lossless speculative decoding of
 [Qwen/Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B).
 
@@ -31,8 +33,8 @@ with the target in float32 they are identical.
 
 ## Quick start
 
-Only `torch` and `transformers>=4.56` are needed (the model code ships with the weights). Run the drafter
-and the target on one device:
+Only `torch` and `transformers>=4.56` are needed, since the model code ships with the weights. Run the
+drafter and the target on one device:
 
 ```python
 import torch
@@ -54,8 +56,39 @@ print("acceptance length:", output.acceptance_length)
 
 `num_steps=2` drafts with two jumps of the map. The drafter uses the target's token embedding and
 lm_head, so it is only valid with Qwen/Qwen3-4B. It was trained on sequences of up to 4096 tokens:
-longer contexts stay lossless, but their acceptance is untested. See the [GitHub repository](https://github.com/al-jshen/flashmap)
-for the API and benchmarks.
+longer contexts stay lossless, but their acceptance is untested. The [GitHub repository](https://github.com/al-jshen/flashmap)
+has the API, examples and an installable package (`uv pip install git+https://github.com/al-jshen/flashmap`).
+
+## Serving with SGLang or vLLM
+
+The code above is written for clarity rather than speed. For serving, use the SGLang or vLLM integration
+(tensor parallelism 1). Both draft over the top 65,536 tokens of `draft_vocab.safetensors` by default.
+
+SGLang 0.5.20 exactly, with [our SpecForge fork](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/basic_usage/flashmap_sglang.md):
+
+```bash
+uv pip install "sglang==0.5.20"
+uv pip install --no-deps "git+https://github.com/al-jshen/SpecForge@flashmap"
+hf download al-jshen/FlashMap-Qwen3-4B --local-dir FlashMap-Qwen3-4B
+python -m specforge.export.flashmap --src FlashMap-Qwen3-4B --output-dir FlashMap-Qwen3-4B-sglang
+SGLANG_EXTERNAL_MODEL_PACKAGE=specforge.serving.sglang \
+python -m sglang.launch_server --model-path Qwen/Qwen3-4B \
+  --speculative-algorithm DSPARK --speculative-draft-model-path FlashMap-Qwen3-4B-sglang \
+  --speculative-dspark-block-size 16 --max-running-requests 32 --cuda-graph-max-bs-decode 32
+```
+
+vLLM 0.31.x, with [our speculators fork](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap.md):
+
+```bash
+uv pip install "vllm==0.31.*" "git+https://github.com/al-jshen/speculators@flashmap"
+hf download al-jshen/FlashMap-Qwen3-4B --local-dir FlashMap-Qwen3-4B
+speculators convert ./FlashMap-Qwen3-4B --algorithm flashmap --verifier Qwen/Qwen3-4B \
+    --output-path ./FlashMap-Qwen3-4B-speculators
+vllm serve ./FlashMap-Qwen3-4B-speculators
+```
+
+Use a separate environment for each engine. The linked guides cover sampling at temperature > 0, two-jump
+drafting and benchmarks.
 
 ## Results
 
@@ -78,9 +111,6 @@ Speedup over autoregressive decoding with Qwen3-4B (SGLang, one H200 NVL), Flash
 |---|---|---|---|---|---|---|---|---|---|
 | 0 | 5.14x | 5.02x | 4.47x | 3.71x | 4.04x | 4.28x | 2.46x | 2.28x | 2.66x |
 | 1 | 4.59x | 3.81x | 3.12x | 3.26x | 3.69x | 3.24x | 2.25x | 2.04x | 2.17x |
-
-The transformers implementation here is written for clarity rather than speed; use the SGLang (SpecForge)
-and vLLM (speculators) integrations for serving (links TBD).
 
 ## Files
 
@@ -107,10 +137,10 @@ The model weights are released under Apache-2.0, following Qwen3; the model code
 ## Citation
 
 ```bibtex
-@article{flashmap2026,
-  title   = {{FlashMap: Flow Map Speculative Decoding}},
-  author  = {TBD},
-  journal = {TBD},
-  year    = {2026}
+@misc{flashmap2026,
+  title  = {{FlashMap}: Flow Map Speculative Decoding},
+  author = {Shen, Jeff and others},
+  year   = {2026},
+  note   = {Preprint, coming soon}
 }
 ```
