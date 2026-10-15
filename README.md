@@ -49,8 +49,7 @@ print("acceptance length:", output.acceptance_length)
 `num_steps=2` drafts with two jumps of the flow map (trading speed for accuracy). 
 The model code also ships with the weights, so `AutoModel.from_pretrained(..., trust_remote_code=True)` works without this
 package. 
-The [examples](examples/) measure acceptance length and speedup on GSM8K, HumanEval and MT-Bench,
-and [docs/details.md](docs/details.md) documents the API and how the drafter works.
+The [examples](examples/) measure acceptance length and speedup on GSM8K, HumanEval and MT-Bench.
 
 ## Serve with SGLang
 
