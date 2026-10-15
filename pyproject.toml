@@ -1,22 +1,35 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "flashmap"
 version = "0.1.0"
-description = "FlashMap: flow map speculative decoding with Hugging Face transformers"
+description = "FlashMap: flow map speculative decoding for Hugging Face transformers"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Jeff Shen" }]
 requires-python = ">=3.10"
 dependencies = ["torch>=2.1", "transformers>=4.56"]
+keywords = ["speculative decoding", "flow map", "draft model", "llm inference", "transformers"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 
 [project.optional-dependencies]
 benchmark = ["datasets"]
 test = ["pytest"]
 
 [project.urls]
-Homepage = "https://github.com/al-jshen/flashmap"
+Homepage = "https://jshen.net/flashmap"
+Repository = "https://github.com/al-jshen/flashmap"
+Documentation = "https://github.com/al-jshen/flashmap/blob/master/docs/details.md"
+"Model (Qwen3-8B)" = "https://huggingface.co/al-jshen/FlashMap-Qwen3-8B"
+"Model (Qwen3-4B)" = "https://huggingface.co/al-jshen/FlashMap-Qwen3-4B"
 
 [tool.setuptools]
 packages = ["flashmap"]
