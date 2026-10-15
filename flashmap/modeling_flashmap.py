@@ -477,6 +477,12 @@ class FlashMapDraftModel(PreTrainedModel):
         if input_ids.shape[0] != 1:
             raise ValueError("spec_generate decodes one sequence at a time")
         self.check_target(target)
+        if generator is not None:  # a "cuda" generator (no index) is on the current device
+            device = generator.device
+            if device.type == "cuda" and device.index is None:
+                device = torch.device("cuda", torch.cuda.current_device())
+            if (device.type, device.index or 0) != (self.device.type, self.device.index or 0):
+                raise ValueError(f"generator must be on {self.device}, got one on {generator.device}")
         if stop_token_ids is None:
             eos = target.generation_config.eos_token_id
             stop_token_ids = [] if eos is None else [eos] if isinstance(eos, int) else list(eos)
@@ -534,7 +540,9 @@ class FlashMapDraftModel(PreTrainedModel):
                 tokens = torch.cat([tokens, new_tokens], dim=1)
                 acceptance_lengths.append(new_tokens.shape[1])
                 # keep the anchor and the accepted drafts; the bonus token is the next anchor
-                target_cache.crop(position + accepted + 1)
+                excess = target_cache.get_seq_length() - (position + accepted + 1)
+                if excess > 0:  # crop(-n) drops n tokens in every transformers version
+                    target_cache.crop(-excess)
                 self.extend_context(cache, target_features()[:, : accepted + 1])
 
         tokens = tokens[:, :max_new_tokens]

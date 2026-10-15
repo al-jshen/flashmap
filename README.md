@@ -28,7 +28,7 @@ uv pip install git+https://github.com/al-jshen/flashmap
 ```
 
 The package needs only `torch` and `transformers>=4.56`; serving takes the `sglang` or `vllm` extra (below). It
-is tested with torch 2.9 and 2.13 and with transformers 4.57, 5.10 and 5.16.
+is tested with torch 2.9 and 2.13 and with transformers 4.57, 5.10, 5.16 and 5.20.
 
 ## Quickstart
 

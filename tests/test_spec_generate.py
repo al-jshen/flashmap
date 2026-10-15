@@ -7,6 +7,7 @@ import itertools
 import tempfile
 import types
 
+import pytest
 import torch
 from transformers import AutoModel, Qwen3Config, Qwen3ForCausalLM
 
@@ -167,6 +168,21 @@ def test_sampling_is_target_sampling():
         ]
     )
     assert tv <= reference.quantile(0.99), (tv, reference.quantile(0.99))
+
+
+@torch.no_grad()
+def test_generator_on_another_device():
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU")
+    target, draft = tiny_models(vocab_size=64)
+    input_ids = torch.randint(64, (1, 4))
+    with pytest.raises(ValueError, match="generator must be on cpu"):
+        draft.spec_generate(target, input_ids, max_new_tokens=4, generator=torch.Generator(device="cuda"))
+    target, draft = target.cuda(), draft.cuda()
+    for generator in (torch.Generator(device="cuda"), torch.Generator(device="cuda:0")):  # both name cuda:0
+        draft.spec_generate(target, input_ids.cuda(), max_new_tokens=4, temperature=1.0, generator=generator)
+    with pytest.raises(ValueError, match="generator must be on cuda:0"):
+        draft.spec_generate(target, input_ids.cuda(), max_new_tokens=4, temperature=1.0, generator=torch.Generator())
 
 
 def test_save_and_reload():

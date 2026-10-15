@@ -24,8 +24,8 @@ python -m pytest tests   # CPU tests on tiny random models
 ```
 
 With the package installed, `import flashmap` registers FlashMap with `AutoModel`, which then loads FlashMap
-folders without `trust_remote_code`. The package is tested with transformers 4.57, 5.10 and 5.16 and torch
-2.9 and 2.13 (`transformers>=4.56` is needed for the `dtype` argument).
+folders without `trust_remote_code`. The package is tested with transformers 4.57, 5.10, 5.16 and 5.20 and
+torch 2.9 and 2.13 (`transformers>=4.56` is needed for the `dtype` argument).
 
 This implementation favors readability over speed (eager PyTorch, a full-vocabulary lm_head, batch size 1).
 For serving, use SGLang with `flashmap[sglang]` ([Serving with SGLang](#serving-with-sglang)) or vLLM with
