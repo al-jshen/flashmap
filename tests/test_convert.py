@@ -189,6 +189,11 @@ def test_specforge_with_draft_vocab(tmp_path):
     assert released["speculators_config"]["verifier"]["name_or_path"] == "toy/target"
     assert released["speculators_config"]["proposal_methods"][0]["speculative_tokens"] == 4
     assert released["transformer_layer_config"] == {} and released["draft_vocab_size"] == 64
+    # sglang's fields: the context it may serve and DSPARK's (the toy target has no
+    # tokenizer, so the mask token is the last embedding row)
+    assert released["max_position_embeddings"] == 131072
+    vocab_size = config.vocab_size
+    assert released["dspark_config"] == {"markov_rank": 1, "markov_head_type": "vanilla", "mask_token_id": vocab_size - 1}
     # a release converts again as itself, not as a speculators checkpoint
     convert_checkpoint.convert(tmp_path / "out", tmp_path / "again", dtype=torch.float32)
     check_release(tmp_path / "again", weights, target_layer_ids=TARGET_LAYER_IDS, jump_grids=config.jump_grids)

@@ -23,8 +23,9 @@ draft_vocab.safetensors, the target's token-frequency ranking that serving
 integrations use to restrict the draft vocabulary. The saved weights are checked
 against the source and against the names and shapes the model expects.
 
-config.json also carries the fields with which vLLM serves the folder as it is
-(with `pip install flashmap[vllm]`, see `vllm_fields`).
+config.json also carries the fields with which vLLM and sglang serve the folder as
+it is (with `pip install flashmap[vllm]` or `flashmap[sglang]`, see `vllm_fields`
+and `sglang_fields`).
 """
 
 import argparse
@@ -231,6 +232,40 @@ def vllm_fields(block_size: int, target_model: str, target_architectures: list, 
     return fields
 
 
+# Positions a served draft accepts: Qwen3's context with YaRN (and vLLM's default).
+MAX_POSITION_EMBEDDINGS = 131072
+
+
+def sglang_fields(target_model: str, vocab_size: int) -> dict:
+    """config.json fields for sglang's DSPARK worker, which drafts with flashmap.sglang:
+    the longest context it may serve (sglang refuses a target context longer than the
+    draft's) and, under `dspark_config`, DSPARK's own fields: a rank-1 "vanilla" Markov
+    head, which flashmap.sglang replaces by an identity (FlashMap has none), and the
+    token DSPARK fills the block's slots with, which FlashMap never reads."""
+    return {
+        "max_position_embeddings": MAX_POSITION_EMBEDDINGS,
+        "dspark_config": {
+            "markov_rank": 1,
+            "markov_head_type": "vanilla",
+            "mask_token_id": mask_token_id(target_model, vocab_size),
+        },
+    }
+
+
+def mask_token_id(target_model: str, vocab_size: int) -> int:
+    """A token id outside the target tokenizer's vocabulary (151669 for Qwen3): the
+    first past it, or the last embedding row if the tokenizer is not reachable."""
+    try:
+        from transformers import AutoTokenizer
+
+        tokens = len(AutoTokenizer.from_pretrained(target_model))
+        if tokens < vocab_size:
+            return tokens
+    except Exception:  # noqa: BLE001
+        pass
+    return vocab_size - 1
+
+
 def target_architectures(target_model: str) -> list:
     """The target's architectures from its config.json, or [] if it is not reachable
     (vLLM reads only the target's name)."""
@@ -312,6 +347,8 @@ def convert(checkpoint, output, target_model=None, model_card=None, draft_vocab=
     for key, value in vllm_fields(
         config.block_size, config.target_model, target_architectures(config.target_model), vocab_size
     ).items():
+        setattr(config, key, value)
+    for key, value in sglang_fields(config.target_model, config.vocab_size).items():
         setattr(config, key, value)
 
     output.mkdir(parents=True, exist_ok=True)

@@ -64,17 +64,13 @@ has the API, examples and an installable package (`uv pip install git+https://gi
 The code above is written for clarity rather than speed. For serving, use the SGLang or vLLM integration
 (tensor parallelism 1). Both draft over the top 65,536 tokens of `draft_vocab.safetensors` by default.
 
-SGLang 0.5.20 exactly, with [our SpecForge fork](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/basic_usage/flashmap_sglang.md):
+SGLang 0.5.20 exactly, with the [SGLang plugin](https://github.com/al-jshen/flashmap/blob/master/docs/details.md#serving-with-sglang)
+of the flashmap package, which serves this folder as it is:
 
 ```bash
-uv pip install "sglang==0.5.20"
-uv pip install --no-deps "git+https://github.com/al-jshen/SpecForge@flashmap"
-hf download j-shen/FlashMap-Qwen3-8B --local-dir FlashMap-Qwen3-8B
-python -m specforge.export.flashmap --src FlashMap-Qwen3-8B --output-dir FlashMap-Qwen3-8B-sglang
-SGLANG_EXTERNAL_MODEL_PACKAGE=specforge.serving.sglang \
+uv pip install "sglang==0.5.20" "flashmap[sglang] @ git+https://github.com/al-jshen/flashmap"
 python -m sglang.launch_server --model-path Qwen/Qwen3-8B \
-  --speculative-algorithm DSPARK --speculative-draft-model-path FlashMap-Qwen3-8B-sglang \
-  --speculative-dspark-block-size 16 --max-running-requests 32 --cuda-graph-max-bs-decode 32
+  --speculative-algorithm DSPARK --speculative-draft-model-path j-shen/FlashMap-Qwen3-8B
 ```
 
 vLLM 0.31.x, with the [vLLM plugin](https://github.com/al-jshen/flashmap/blob/master/docs/details.md#serving-with-vllm)

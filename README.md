@@ -28,7 +28,7 @@ source .venv/bin/activate
 uv pip install git+https://github.com/al-jshen/flashmap
 ```
 
-The package needs only `torch` and `transformers>=4.56`; serving with vLLM takes the `vllm` extra (below). It
+The package needs only `torch` and `transformers>=4.56`; serving takes the `sglang` or `vllm` extra (below). It
 is tested with torch 2.9 and 2.13 and with transformers 4.57, 5.10 and 5.16.
 
 ## Quickstart
@@ -60,32 +60,25 @@ and [docs/details.md](docs/details.md) documents the API and how the drafter wor
 
 ## Serve with SGLang
 
-The SGLang integration lives in [our SpecForge fork](https://github.com/al-jshen/SpecForge/tree/flashmap).
-It needs `sglang==0.5.20` exactly and tensor parallelism 1. SpecForge is installed without its dependencies,
-because it pins a different sglang version for training.
+The `sglang` extra adds a plugin that SGLang loads automatically, so SGLang itself is unchanged and the
+release checkpoint is served as it is. It needs `sglang==0.5.20` exactly and tensor parallelism 1.
 
 ```bash
 uv venv --python 3.12 .venv-sglang
 source .venv-sglang/bin/activate
-uv pip install "sglang==0.5.20"
-uv pip install --no-deps "git+https://github.com/al-jshen/SpecForge@flashmap"
+uv pip install "sglang==0.5.20" "flashmap[sglang] @ git+https://github.com/al-jshen/flashmap"
 
-# Export the release checkpoint for SGLang (64k-token draft vocabulary by default)
-hf download j-shen/FlashMap-Qwen3-8B --local-dir FlashMap-Qwen3-8B
-python -m specforge.export.flashmap --src FlashMap-Qwen3-8B --output-dir FlashMap-Qwen3-8B-sglang
-
-SGLANG_EXTERNAL_MODEL_PACKAGE=specforge.serving.sglang \
-python -m sglang.launch_server \
-  --model-path Qwen/Qwen3-8B \
-  --speculative-algorithm DSPARK \
-  --speculative-draft-model-path FlashMap-Qwen3-8B-sglang \
-  --speculative-dspark-block-size 16 \
-  --max-running-requests 32 --cuda-graph-max-bs-decode 32
+python -m sglang.launch_server --model-path Qwen/Qwen3-8B \
+  --speculative-algorithm DSPARK --speculative-draft-model-path j-shen/FlashMap-Qwen3-8B
 ```
 
-Set `FLASHMAP_NUM_STEPS=2` when launching to draft with two jumps. The
-[SGLang guide](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/basic_usage/flashmap_sglang.md)
-covers the options and tree drafting.
+The drafter uses its 64k-token draft vocabulary and its 16-token block by default, and sampling at
+`temperature > 0` needs no extra option. Set `FLASHMAP_NUM_STEPS=2` when launching to draft with two jumps.
+[Serving with SGLang](docs/details.md#serving-with-sglang) covers the options, including tree drafting.
+
+The same integration lives in [our SpecForge fork](https://github.com/al-jshen/SpecForge/tree/flashmap),
+which trains FlashMap and is where the integration would be upstreamed to SGLang from. Serving needs only
+`flashmap[sglang]`.
 
 ## Serve with vLLM
 

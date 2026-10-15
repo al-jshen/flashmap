@@ -28,7 +28,7 @@ folders without `trust_remote_code`. The package is tested with transformers 4.5
 2.9 and 2.13 (`transformers>=4.56` is needed for the `dtype` argument).
 
 This implementation favors readability over speed (eager PyTorch, a full-vocabulary lm_head, batch size 1).
-For serving, use the SGLang (SpecForge) integration in the [README](../README.md) or vLLM with
+For serving, use SGLang with `flashmap[sglang]` ([Serving with SGLang](#serving-with-sglang)) or vLLM with
 `flashmap[vllm]` ([Serving with vLLM](#serving-with-vllm)).
 
 ## API
@@ -102,6 +102,67 @@ and two steps). In bfloat16 the batched verification pass and token-by-token dec
 the two can part where the target's top two logits tie to within bfloat16 precision. `tests/` checks greedy
 and sampled losslessness on tiny random models.
 
+## Serving with SGLang
+
+`flashmap[sglang]` installs `flashmap.sglang`, an SGLang plugin (entry point group `sglang.srt.plugins`,
+name `flashmap`) that SGLang runs at startup in each of its processes. Without changing SGLang, it adds the
+`FlashMapDraftModel` architecture, which SGLang's DSPARK speculative worker drafts with, and it serves a
+release folder, local or on the Hub, as it is:
+
+```bash
+uv pip install "sglang==0.5.20" "flashmap[sglang] @ git+https://github.com/al-jshen/flashmap"
+python -m sglang.launch_server --model-path Qwen/Qwen3-8B \
+    --speculative-algorithm DSPARK --speculative-draft-model-path j-shen/FlashMap-Qwen3-8B
+```
+
+- Requirements: sglang 0.5.20 exactly (on another version the plugin logs a warning and leaves SGLang
+  untouched; `FLASHMAP_SGLANG_ANY_VERSION=1` tries anyway), tensor parallelism 1 and a target whose
+  vocabulary is not padded. Each is checked when the drafter loads.
+- The plugin registers the model through `SGLANG_EXTERNAL_MODEL_PACKAGE=flashmap.sglang`, SGLang's
+  mechanism for models outside its tree, which it sets for the server's processes. Set it yourself where
+  SGLang's plugins do not run, or when `SGLANG_PLUGINS` lists others but not `flashmap`.
+- The block size (16) comes from config.json. `--speculative-dspark-block-size G` with `G < 16` verifies
+  only the first `G` drafts of each block, which can pay off at high concurrency.
+- The draft head covers the first `draft_vocab_size` (65,536) tokens of `draft_vocab.safetensors`, which
+  SGLang loads with the weights; the target still verifies every token, so outputs are unchanged.
+  `FLASHMAP_DRAFT_VOCAB=0` drafts over the full vocabulary.
+- Sampling at `temperature > 0` needs no option: DSPARK samples the drafts from FlashMap's distribution and
+  verifies them against it.
+- Options, set in the server's environment unless noted: `FLASHMAP_NUM_STEPS=2` drafts with two jumps
+  (higher acceptance, slower drafts); `FLASHMAP_FP8=1` keeps FP8 copies of the draft's large weights (Ada
+  or Hopper); `--speculative-draft-kv-cache-dtype fp8_e4m3` stores the draft's KV cache in FP8, which
+  leaves more memory for the target's. `FLASHMAP_COMPILE=0` turns off `torch.compile` of the draft step.
+- Tree drafting: `FLASHMAP_TREE_N=8` drafts up to 8 blocks per request from independent noise in one pass
+  and verifies their trie, cut to the block size, in one target pass (`FLASHMAP_TREE_BUDGET`, 32 by
+  default, caps the blocks per batch). It serves greedy requests only: a request that samples, asks for
+  logprobs or constrains its output is refused with an error saying why. It needs
+  `SGLANG_DSPARK_FOLDED_PROPOSAL=0`, `--page-size 1` and a target attention backend that applies tree masks
+  (`fa3`, `flashinfer` or `triton`); with `--attention-backend triton`, `FLASHMAP_SPLITKV_VERIFY=1` verifies
+  with a split-KV attention kernel. It pays off at low concurrency.
+
+The plugin reads these config.json fields, which `scripts/convert_checkpoint.py` writes next to the
+model's own:
+
+| Field | Value | Use |
+| --- | --- | --- |
+| `max_position_embeddings` | `131072` | the longest context the drafter is served with (SGLang refuses a target context longer than the draft's) |
+| `dspark_config` | `{"markov_rank": 1, "markov_head_type": "vanilla", "mask_token_id": 151669}` | DSPARK's own fields: the plugin replaces DSPARK's rank-1 Markov head by an identity (FlashMap has none), and the mask token fills block slots FlashMap never reads |
+| `draft_vocab_size` | `65536` | size of the draft head's vocabulary, taken from `draft_vocab.safetensors` (shared with vLLM) |
+
+`scripts/check_sglang.py` checks the served drafter against `FlashMapDraftModel` on a GPU, with the
+target's embedding and lm_head:
+
+```bash
+python scripts/check_sglang.py --draft FlashMap-Qwen3-8B --target Qwen/Qwen3-8B
+```
+
+The same integration lives in [our SpecForge fork](https://github.com/al-jshen/SpecForge/tree/flashmap)
+(`specforge.serving.sglang`), which trains FlashMap and is where the integration would be upstreamed to
+SGLang from; its
+[SGLang guide](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/basic_usage/flashmap_sglang.md)
+covers SpecForge's export path. With `SGLANG_EXTERNAL_MODEL_PACKAGE=specforge.serving.sglang`, the plugin
+leaves FlashMap to SpecForge.
+
 ## Serving with vLLM
 
 `flashmap[vllm]` installs `flashmap.vllm`, a vLLM general plugin (entry point group `vllm.general_plugins`,
@@ -157,7 +218,7 @@ FlashMap was first trained in a fork of [DeepSpec](https://github.com/deepseek-a
 be trained with speculators (vLLM) or SpecForge (SGLang); see [Training](../README.md#training).
 `scripts/convert_checkpoint.py` recognizes DeepSpec checkpoints, speculators checkpoints and SpecForge's
 `specforge export --to hf` folders, and writes a release folder for this package: the config (with the
-[fields vLLM serves it with](#serving-with-vllm)), the weights without the target's embedding and lm_head,
+fields [SGLang](#serving-with-sglang) and [vLLM](#serving-with-vllm) serve it with), the weights without the target's embedding and lm_head,
 the model code and, optionally, a model card and the draft-vocabulary ranking. It checks the weights against the source and against the names and shapes the
 model expects.
 
