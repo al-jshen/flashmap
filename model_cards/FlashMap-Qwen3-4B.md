@@ -113,7 +113,7 @@ The model weights are released under Apache-2.0, following Qwen3; the model code
 ```bibtex
 @misc{flashmap2026,
   title  = {{FlashMap}: Flow Map Speculative Decoding},
-  author = {Shen, Jeff and others},
+  author = {Shen, Jeff and Zhou, Zhejian and Lee, Ryan and May, Jonathan and Ho, Shirley},
   year   = {2026},
   note   = {Preprint, coming soon}
 }

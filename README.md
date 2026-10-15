@@ -127,6 +127,17 @@ Both write a trained map as a release folder for this package (`speculators conv
 `specforge export --to hf`), and [`scripts/convert_checkpoint.py`](scripts/convert_checkpoint.py) converts
 speculators and SpecForge checkpoints too ([details](docs/details.md#converting-checkpoints)).
 
+## Citation
+
+```bibtex
+@misc{flashmap2026,
+  title  = {{FlashMap}: Flow Map Speculative Decoding},
+  author = {Shen, Jeff and Zhou, Zhejian and Lee, Ryan and May, Jonathan and Ho, Shirley},
+  year   = {2026},
+  note   = {Preprint, coming soon}
+}
+```
+
 ## License
 
 The code is released under the [MIT license](LICENSE). The model weights are released under Apache-2.0,
