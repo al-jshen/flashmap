@@ -1,43 +1,46 @@
 # FlashMap: Flow Map Speculative Decoding
 
-FlashMap is a drafter for lossless speculative decoding. Like
-[DFlash](https://github.com/z-lab/dflash) it drafts a whole block of tokens in one forward pass of a small
-network conditioned on the target model's hidden states; unlike DFlash, its block is drawn from a generative
-model that can couple the positions instead of predicting each one independently. The block is drawn by a
-flow map ([Flow Map Language Models](https://arxiv.org/abs/2602.16813)): a network that transports Gaussian
-noise to the block's tokens in a single jump, distilled from a continuous flow over one-hot token blocks. One
-jump is the fastest drafter but captures the joint structure of a block only partly (the paper's shuffle test
-measures how much); two jumps cost a second network evaluation, capture more of it and accept more tokens.
+**[Project page](https://jshen.net/flashmap)** · **Paper** (coming soon) · **[Models](#models)**
 
-This repository is a minimal, standalone implementation of FlashMap inference with Hugging Face
-`transformers`: the drafter is a `PreTrainedModel` loadable with `AutoModel`, and `spec_generate` runs
-lossless speculative decoding with the `transformers` model each drafter was trained for. Training code is
-not included.
+FlashMap is a drafter for lossless speculative decoding. Like [DFlash](https://github.com/z-lab/dflash), it
+proposes a whole block of 16 tokens in one forward pass of a small network conditioned on the target model's
+hidden states. Unlike DFlash, which predicts each token of the block independently, FlashMap draws the block
+from a flow map ([Flow Map Language Models](https://arxiv.org/abs/2602.16813)), which jumps from Gaussian
+noise to the whole block in a single step and can capture dependencies between its tokens. The target model
+verifies every block, so the output is exactly the target's own. On Qwen3-8B, FlashMap decodes up to 6x faster
+than the target alone.
+
+This repository is a small, standalone implementation for Hugging Face `transformers`. For fast serving, use
+the [SGLang](#serve-with-sglang) or [vLLM](#serve-with-vllm) integration.
 
 ## Models
 
-| Drafter | Target | Parameters |
+| Drafter | Target | Drafter parameters |
 |---|---|---|
 | [al-jshen/FlashMap-Qwen3-8B](https://huggingface.co/al-jshen/FlashMap-Qwen3-8B) | [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) | 500M |
 | [al-jshen/FlashMap-Qwen3-4B](https://huggingface.co/al-jshen/FlashMap-Qwen3-4B) | [Qwen/Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) | 475M |
 
-The drafters use the target's token embedding and lm_head, which are not part of their weights. Each
-model folder also has `draft_vocab.safetensors`, the target's response tokens ranked by frequency; this
-implementation does not need it, and the serving integrations use its top 65,536 tokens as a smaller draft
-head. They were
-trained on sequences of up to 4096 tokens: longer contexts stay lossless, but their acceptance is untested.
+## Install
 
-## Quick start
+```bash
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install git+https://github.com/al-jshen/flashmap
+```
 
-The model code ships with the weights, so `torch` and `transformers` are all you need:
+The package needs only `torch` and `transformers>=4.56`. It is tested with torch 2.9 and 2.13 and with
+transformers 4.57, 5.10 and 5.16.
+
+## Quickstart
 
 ```python
 import torch
-from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from flashmap import FlashMapDraftModel
 
 tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B")
 target = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B", dtype=torch.bfloat16).cuda().eval()
-draft = AutoModel.from_pretrained("al-jshen/FlashMap-Qwen3-8B", trust_remote_code=True, dtype=torch.bfloat16).cuda().eval()
+draft = FlashMapDraftModel.from_pretrained("al-jshen/FlashMap-Qwen3-8B", dtype=torch.bfloat16).cuda().eval()
 
 messages = [{"role": "user", "content": "How many positive whole-number divisors does 196 have?"}]
 input_ids = tokenizer.apply_chat_template(
@@ -49,163 +52,135 @@ print(tokenizer.decode(output.sequences[0, input_ids.shape[1]:], skip_special_to
 print("acceptance length:", output.acceptance_length)
 ```
 
-Run the drafter, the target and its embedding and lm_head on one device. Tested with transformers 4.57,
-5.10 and 5.16 and torch 2.9 and 2.13 (`transformers>=4.56` is needed for the `dtype` argument). The examples load the
-model code from the checkpoint too, so they run without installing this repository:
+`num_steps=2` drafts with two jumps of the flow map: each draft is slower, but more of its tokens are
+accepted. At `temperature > 0` the output follows the target's sampling distribution exactly. The model code
+also ships with the weights, so `AutoModel.from_pretrained(..., trust_remote_code=True)` works without this
+package. The [examples](examples/) measure acceptance length and speedup on GSM8K, HumanEval and MT-Bench,
+and [docs/details.md](docs/details.md) documents the API and how the drafter works.
+
+## Serve with SGLang
+
+The SGLang integration lives in [our SpecForge fork](https://github.com/al-jshen/SpecForge/tree/flashmap).
+It needs `sglang==0.5.20` exactly and tensor parallelism 1. SpecForge is installed without its dependencies,
+because it pins a different sglang version for training.
 
 ```bash
-python examples/generate.py --draft al-jshen/FlashMap-Qwen3-8B --target Qwen/Qwen3-8B --prompt "..."
-python examples/benchmark.py --draft al-jshen/FlashMap-Qwen3-8B --target Qwen/Qwen3-8B \
-    --dataset gsm8k --num-prompts 16 --baseline   # needs `datasets`
+uv venv --python 3.12 .venv-sglang
+source .venv-sglang/bin/activate
+uv pip install "sglang==0.5.20"
+uv pip install --no-deps "git+https://github.com/al-jshen/SpecForge@flashmap"
+
+# Export the release checkpoint for SGLang (64k-token draft vocabulary by default)
+hf download al-jshen/FlashMap-Qwen3-8B --local-dir FlashMap-Qwen3-8B
+python -m specforge.export.flashmap --src FlashMap-Qwen3-8B --output-dir FlashMap-Qwen3-8B-sglang
+
+SGLANG_EXTERNAL_MODEL_PACKAGE=specforge.serving.sglang \
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3-8B \
+  --speculative-algorithm DSPARK \
+  --speculative-draft-model-path FlashMap-Qwen3-8B-sglang \
+  --speculative-dspark-block-size 16 \
+  --max-running-requests 32 --cuda-graph-max-bs-decode 32
 ```
 
-Installing this repository (`pip install -e .`) gives the same classes as a package: after `import flashmap`,
-`AutoModel` loads FlashMap folders without `trust_remote_code`. `pip install -e ".[test]"; pytest tests` runs
-the CPU tests.
+Set `FLASHMAP_NUM_STEPS=2` when launching to draft with two jumps. The
+[SGLang guide](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/basic_usage/flashmap_sglang.md)
+covers the options, tree drafting and the full benchmarks.
 
-## API
+## Serve with vLLM
 
-`FlashMapDraftModel.spec_generate(target, input_ids, max_new_tokens=256, temperature=0.0, num_steps=None,
-stop_token_ids=None, generator=None)` decodes one prompt `input_ids` of shape `(1, P)` and returns a
-`FlashMapGenerateOutput` with
+The vLLM integration is a plugin in [our speculators fork](https://github.com/al-jshen/speculators/tree/flashmap),
+which vLLM loads automatically, so vLLM itself is unchanged. It needs vLLM 0.31.x, tensor parallelism 1 and
+vLLM's FlashAttention backend; each requirement is checked when the drafter loads.
 
-- `sequences`: the prompt followed by the generated tokens, `(1, P + num_new_tokens)`;
-- `num_new_tokens`;
-- `acceptance_lengths`: the tokens committed by each target forward pass (accepted draft tokens plus the
-  target's own; the last pass counts in full even where it runs past `max_new_tokens`); `acceptance_length`
-  is their mean, the usual acceptance length (tau or gamma).
+```bash
+uv venv --python 3.12 .venv-vllm
+source .venv-vllm/bin/activate
+uv pip install "vllm==0.31.*" "git+https://github.com/al-jshen/speculators@flashmap"
 
-Every round drafts the 16 tokens after the last one, the target scores them in one forward pass, and the
-longest prefix the target accepts is kept together with one token of the target's own. At temperature 0 the
-output is the target's greedy decoding. Above it, drafts are sampled from `softmax(logits / temperature)`
-per slot and accepted by rejection sampling against the target's `softmax(logits / temperature)`, so the
-output is distributed exactly as the target's own samples. (Given its noise, a FlashMap draft's slots are
-independent draws, so these per-slot probabilities are an exact proposal distribution.) `num_steps` is the
-number of flow-map jumps per draft: 1 (default) or 2; the config also holds the jump grids for 3 and 4.
-Generation stops after `max_new_tokens` or at a stop token (default: the target's `eos_token_id`). A
-`generator` makes sampling reproducible and must live on the model's device. `spec_generate` checks that the
-target's vocabulary and hidden size fit the drafter, and warns if the target is not the one it was trained
-for. It reads the target's hidden states through forward hooks on the layers it needs, so a long prompt does
-not keep every layer's activations.
+# Convert the release checkpoint to the speculators format (64k-token draft vocabulary by default)
+hf download al-jshen/FlashMap-Qwen3-8B --local-dir FlashMap-Qwen3-8B
+speculators convert ./FlashMap-Qwen3-8B --algorithm flashmap --verifier Qwen/Qwen3-8B \
+    --output-path ./FlashMap-Qwen3-8B-speculators
 
-`spec_generate` is built from three lower-level pieces, which other decoding loops can reuse:
+vllm serve ./FlashMap-Qwen3-8B-speculators
+```
 
-- `FlashMapCache(draft.config, batch_size, max_length, device=draft.device, dtype=draft.dtype)`: the
-  drafter's cross-attention keys and values;
-- `draft.extend_context(cache, features)`: append the target's hidden states at newly verified positions
-  (projected to keys and values once and cached, so a draft never reprocesses the context). The features
-  come from `draft.select_target_hidden(target_output.hidden_states)`, or from the hooks of
-  `with draft.target_features(target) as features: ... features()`;
-- `draft.draft(anchor_ids, cache, target.get_input_embeddings(), target.get_output_embeddings(), num_steps)`:
-  the logits `(B, 16, V)` of the block after the anchor tokens.
+For sampling at `temperature > 0`, pass the speculative config explicitly, so that drafts are sampled from
+FlashMap's own distribution:
 
-## How it works
+```bash
+vllm serve Qwen/Qwen3-8B --speculative-config '{"model": "./FlashMap-Qwen3-8B-speculators",
+    "method": "dflash", "num_speculative_tokens": 16, "draft_sample_method": "probabilistic"}'
+```
 
-A block of `K = 16` tokens is a point in `R^{K x V}` on the path `x_s = (1 - s) x0 + s onehot(y)` from noise
-`x0 ~ N(0, I)` (`s = 0`) to the one-hot tokens `y` (`s = 1`). The drafter is a two-time denoiser: given the
-state at time `s` it predicts, for every slot, a distribution over the vocabulary that tells where the jump
-to time `t` lands. One step is the jump from `s = 0` to `t = 1`, whose output distributions are the draft.
+The [vLLM guide](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap.md)
+covers the requirements, options and full benchmarks.
 
-The network (`flashmap/modeling_flashmap.py`) is a 6-block DiT of width 2048:
+### Sending requests
 
-- **State.** The state is read through the target's token embedding `E`: the embedding of the posterior
-  over clean tokens it implies, plus, weighted by the jump length, its linear projection `x @ E` (at
-  `s = 0` the posterior is uniform, so this is how the map sees its noise). A one-step draft only needs
-  `x0 @ E ~ N(0, E^T E)`, which is drawn as `z @ L^T` with `z ~ N(0, I_H)` and `L L^T = E^T E`, so no
-  vocabulary-sized noise is materialized.
-- **Time.** The start and end times of the jump are embedded and modulate every block through adaptive
-  LayerNorms (AdaLN-zero).
-- **Context.** Each block self-attends across the 16 slots and cross-attends to the target's hidden states
-  (layers 1, 9, 17, 25, 33, fused by a linear layer) at all positions before the anchor, plus the
-  embedding of the anchor token. Their keys and values are computed once per verified token and cached.
-- **Output.** A linear head maps back to the target's hidden size, and the target's lm_head gives the logits.
+Both servers expose an OpenAI-compatible API, SGLang on port 30000 and vLLM on port 8000. The results below
+were measured with Qwen3's thinking mode turned off.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:30000/v1", api_key="none")  # vLLM: port 8000
+response = client.chat.completions.create(
+    model=client.models.list().data[0].id,
+    messages=[{"role": "user", "content": "How many positive whole-number divisors does 196 have?"}],
+    temperature=0,
+    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+)
+print(response.choices[0].message.content)
+```
 
 ## Results
 
-Acceptance length (tokens per target forward pass) on Qwen3-8B with thinking disabled, from the paper
-(SGLang, concurrency 1, 2048 new tokens, 80 prompts per benchmark; DFlash retrained on the same data):
+Speedup over the target alone on Qwen3-8B, with the acceptance length (tokens per target forward pass) in
+parentheses. These runs used greedy decoding at concurrency 1 on one H100 PCIe GPU. DFlash is the public
+[z-lab/Qwen3-8B-DFlash-b16](https://huggingface.co/z-lab/Qwen3-8B-DFlash-b16) checkpoint, and FlashMap
+drafts with one jump.
 
-| T | Drafter | GSM8K | MATH | AIME25 | MBPP | HumanEval | LCB | MT-Bench | Alpaca | Arena-Hard |
-|---|---|---|---|---|---|---|---|---|---|---|
-| 0 | DFlash | 7.43 | 7.09 | 5.92 | 4.77 | 5.74 | 6.35 | 3.14 | 2.96 | 3.38 |
-| 0 | FlashMap, 1 step | 7.69 | 7.24 | 6.00 | 4.95 | 5.82 | 6.65 | 3.34 | 3.14 | 3.71 |
-| 0 | FlashMap, 2 steps | 8.31 | 7.69 | 6.36 | 5.24 | 6.26 | 7.19 | 3.40 | 3.20 | 3.80 |
-| 1 | DFlash | 6.30 | 5.40 | 4.10 | 4.37 | 4.88 | 4.62 | 2.85 | 2.62 | 2.61 |
-| 1 | FlashMap, 1 step | 6.40 | 5.40 | 4.37 | 4.29 | 4.87 | 4.90 | 3.00 | 2.81 | 2.83 |
-| 1 | FlashMap, 2 steps | 7.11 | 5.74 | 4.52 | 4.75 | 5.35 | 5.06 | 3.16 | 2.96 | 2.95 |
+| Engine | Drafter | GSM8K | HumanEval | MT-Bench |
+|---|---|---|---|---|
+| SGLang 0.5.20 | DFlash | 4.68x (6.18) | **4.65x** (6.33) | 1.69x (2.23) |
+| | FlashMap | **6.26x** (7.72) | 4.61x (5.70) | **1.91x** (2.32) |
+| vLLM 0.31.0 | DFlash | 4.50x (5.86) | **4.92x** (6.48) | 2.77x (3.56) |
+| | FlashMap | **5.97x** (7.18) | 4.82x (5.85) | **3.04x** (3.59) |
 
-With one step this is a 6.14x speedup on GSM8K at T = 0 (4.73x on HumanEval, 2.73x on MT-Bench) on an
-H200 in SGLang. The model cards in `model_cards/` have the Qwen3-4B numbers.
+FlashMap is clearly faster on GSM8K and MT-Bench, and DFlash is slightly faster on HumanEval. At higher
+concurrency DFlash's lead on HumanEval grows. The integration guides have results at concurrency 4 and 16, at
+temperature 1, and for Qwen3-4B. In the paper's evaluation, with 9 benchmarks and a DFlash retrained on the
+same data as FlashMap, FlashMap with one jump is the fastest drafter on every benchmark
+([details](docs/details.md#results-from-the-paper)).
 
-This implementation favors readability over speed (eager PyTorch, a full-vocabulary lm_head, batch size 1);
-for serving, use the SGLang (SpecForge) and vLLM (speculators) integrations (links TBD).
+## Training
 
-### Checking this implementation
-
-On the same prompts, with 512 new tokens, the acceptance lengths of `spec_generate` match those of DeepSpec's
-own evaluator (16 prompts per benchmark: the first 16 of the paper's GSM8K and HumanEval sets, every fifth
-MT-Bench question; one H100, bfloat16). The paper's numbers come from SGLang with 80 prompts and 2048 new
-tokens. Even at T = 0 the drafts depend on the draft noise, and with 16 prompts two runs differ by up to
-about 0.3.
-
-| Target | T | Steps | Implementation | GSM8K | HumanEval | MT-Bench |
-|---|---|---|---|---|---|---|
-| Qwen3-8B | 0 | 1 | this repository | 7.82 | 5.74 | 3.39 |
-| | | | DeepSpec | 7.88 | 5.75 | 3.42 |
-| | | | paper | 7.69 | 5.82 | 3.34 |
-| | 0 | 2 | this repository | 8.43 | 6.12 | 3.56 |
-| | | | DeepSpec | 8.34 | 6.03 | 3.50 |
-| | | | paper | 8.31 | 6.26 | 3.40 |
-| | 1 | 1 | this repository | 6.34 | 5.08 | 2.95 |
-| | | | DeepSpec | 6.23 | 4.94 | 2.96 |
-| | | | paper | 6.40 | 4.87 | 3.00 |
-| Qwen3-4B | 0 | 1 | this repository | 7.30 | 5.62 | 3.32 |
-| | | | DeepSpec | 7.05 | 5.69 | 3.30 |
-| | | | paper | 7.24 | 5.62 | 3.40 |
-| | 0 | 2 | this repository | 7.88 | 6.27 | 3.39 |
-| | | | DeepSpec | 7.76 | 6.17 | 3.38 |
-| | | | paper | 7.79 | 6.10 | 3.49 |
-| | 1 | 1 | this repository | 6.42 | 5.15 | 3.12 |
-| | | | DeepSpec | 6.53 | 5.39 | 3.05 |
-| | | | paper | 6.45 | 5.12 | 3.12 |
-
-With the same noise, the draft logits equal DeepSpec's exactly in bfloat16 (on the H100) and to 5e-5 (one
-step) and 9e-4 (two steps) in float32. At temperature 0 the output is the target's own greedy decoding:
-identical on every prompt checked with the target in float32 (6 prompts with Qwen3-8B, 9 with Qwen3-4B, one
-and two steps). In bfloat16 the batched verification pass and token-by-token decoding round differently, so
-the two can part where the target's top two logits tie to within bfloat16 precision. `tests/` checks greedy
-and sampled losslessness on tiny random models.
-
-A draft takes 6.4 ms with one step and 11.3 ms with two (H100, eager PyTorch, Qwen3-8B); `spec_generate`
-decodes GSM8K answers at 235 tokens/s with one step against 51 tokens/s for the target alone.
-
-## Training and converting checkpoints
-
-FlashMap was trained in [a fork of DeepSpec](https://github.com/al-jshen/DeepSpec) (upstream:
-[deepseek-ai/DeepSpec](https://github.com/deepseek-ai/DeepSpec)); it can also be trained with speculators
-(vLLM) or SpecForge (SGLang). Train with any of them, then convert for standalone use:
-`scripts/convert_checkpoint.py` recognizes DeepSpec checkpoints, speculators checkpoints and SpecForge's
-`specforge export --to hf` folders, and writes a release folder (config, weights without the target's
-embedding and lm_head, the model code and, optionally, a model card and the draft-vocabulary ranking). It
-checks the weights against the source and against the names and shapes the model expects.
-
-```bash
-python scripts/convert_checkpoint.py --checkpoint <run>/step_23268 --target-model Qwen/Qwen3-8B \
-    --output FlashMap-Qwen3-8B --model-card model_cards/FlashMap-Qwen3-8B.md
-```
-
-## License
-
-The code in this repository is under the MIT license (`LICENSE`). The model weights are released under
-Apache-2.0, following Qwen3.
+FlashMap is trained in two stages: a flow over one-hot token blocks, then a flow map distilled from it. The
+recipes are in the speculators fork
+([Training FlashMap](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap_training.md))
+and the SpecForge fork ([FlashMap](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/concepts/FlashMap.md)).
+[`scripts/convert_checkpoint.py`](scripts/convert_checkpoint.py) turns a trained checkpoint into a release
+folder for this package ([details](docs/details.md#converting-checkpoints)).
 
 ## Citation
 
 ```bibtex
-@article{flashmap2026,
-  title   = {{FlashMap: Flow Map Speculative Decoding}},
-  author  = {TBD},
-  journal = {TBD},
-  year    = {2026}
+@misc{flashmap2026,
+  title  = {{FlashMap}: Flow Map Speculative Decoding},
+  author = {Shen, Jeff and others},
+  year   = {2026},
+  note   = {Preprint, coming soon}
 }
 ```
+
+## License
+
+The code is released under the [MIT license](LICENSE). The model weights are released under Apache-2.0,
+following Qwen3.
+
+FlashMap builds on [DFlash](https://github.com/z-lab/dflash),
+[Flow Map Language Models](https://arxiv.org/abs/2602.16813), [DeepSpec](https://github.com/deepseek-ai/DeepSpec),
+[SGLang](https://github.com/sgl-project/sglang), [vLLM](https://github.com/vllm-project/vllm),
+[speculators](https://github.com/vllm-project/speculators) and [SpecForge](https://github.com/sgl-project/SpecForge).
