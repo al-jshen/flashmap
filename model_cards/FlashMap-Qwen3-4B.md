@@ -42,7 +42,7 @@ from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
 target = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-4B", dtype=torch.bfloat16).cuda().eval()
-draft = AutoModel.from_pretrained("al-jshen/FlashMap-Qwen3-4B", trust_remote_code=True, dtype=torch.bfloat16).cuda().eval()
+draft = AutoModel.from_pretrained("j-shen/FlashMap-Qwen3-4B", trust_remote_code=True, dtype=torch.bfloat16).cuda().eval()
 
 messages = [{"role": "user", "content": "How many positive whole-number divisors does 196 have?"}]
 input_ids = tokenizer.apply_chat_template(
@@ -69,7 +69,7 @@ SGLang 0.5.20 exactly, with [our SpecForge fork](https://github.com/al-jshen/Spe
 ```bash
 uv pip install "sglang==0.5.20"
 uv pip install --no-deps "git+https://github.com/al-jshen/SpecForge@flashmap"
-hf download al-jshen/FlashMap-Qwen3-4B --local-dir FlashMap-Qwen3-4B
+hf download j-shen/FlashMap-Qwen3-4B --local-dir FlashMap-Qwen3-4B
 python -m specforge.export.flashmap --src FlashMap-Qwen3-4B --output-dir FlashMap-Qwen3-4B-sglang
 SGLANG_EXTERNAL_MODEL_PACKAGE=specforge.serving.sglang \
 python -m sglang.launch_server --model-path Qwen/Qwen3-4B \
@@ -81,7 +81,7 @@ vLLM 0.31.x, with [our speculators fork](https://github.com/al-jshen/speculators
 
 ```bash
 uv pip install "vllm==0.31.*" "git+https://github.com/al-jshen/speculators@flashmap"
-hf download al-jshen/FlashMap-Qwen3-4B --local-dir FlashMap-Qwen3-4B
+hf download j-shen/FlashMap-Qwen3-4B --local-dir FlashMap-Qwen3-4B
 speculators convert ./FlashMap-Qwen3-4B --algorithm flashmap --verifier Qwen/Qwen3-4B \
     --output-path ./FlashMap-Qwen3-4B-speculators
 vllm serve ./FlashMap-Qwen3-4B-speculators

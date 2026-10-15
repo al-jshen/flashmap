@@ -1,6 +1,6 @@
 """Chat with a Qwen3 model accelerated by FlashMap speculative decoding.
 
-    python examples/generate.py --draft al-jshen/FlashMap-Qwen3-8B --target Qwen/Qwen3-8B \
+    python examples/generate.py --draft j-shen/FlashMap-Qwen3-8B --target Qwen/Qwen3-8B \
         --prompt "How many positive whole-number divisors does 196 have?"
 """
 
@@ -13,7 +13,7 @@ from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--draft", default="al-jshen/FlashMap-Qwen3-8B", help="hub id or local folder")
+    parser.add_argument("--draft", default="j-shen/FlashMap-Qwen3-8B", help="hub id or local folder")
     parser.add_argument("--target", default="Qwen/Qwen3-8B")
     parser.add_argument("--prompt", default="How many positive whole-number divisors does 196 have?")
     parser.add_argument("--max-new-tokens", type=int, default=512)

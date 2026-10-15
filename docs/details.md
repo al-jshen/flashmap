@@ -17,8 +17,8 @@ The examples load the model code from the checkpoint, so they also run without i
 ```bash
 git clone https://github.com/al-jshen/flashmap && cd flashmap
 uv pip install -e ".[benchmark,test]"
-python examples/generate.py --draft al-jshen/FlashMap-Qwen3-8B --target Qwen/Qwen3-8B --prompt "..."
-python examples/benchmark.py --draft al-jshen/FlashMap-Qwen3-8B --target Qwen/Qwen3-8B \
+python examples/generate.py --draft j-shen/FlashMap-Qwen3-8B --target Qwen/Qwen3-8B --prompt "..."
+python examples/benchmark.py --draft j-shen/FlashMap-Qwen3-8B --target Qwen/Qwen3-8B \
     --dataset gsm8k --num-prompts 16 --baseline
 python -m pytest tests   # CPU tests on tiny random models
 ```

@@ -1,6 +1,6 @@
 """Acceptance length and speedup of FlashMap speculative decoding on a set of prompts.
 
-    python examples/benchmark.py --draft al-jshen/FlashMap-Qwen3-8B --target Qwen/Qwen3-8B \
+    python examples/benchmark.py --draft j-shen/FlashMap-Qwen3-8B --target Qwen/Qwen3-8B \
         --dataset gsm8k --num-prompts 16 --max-new-tokens 512
 
 The prompts are the first --num-prompts rows of a Hugging Face dataset (gsm8k, humaneval,
@@ -55,7 +55,7 @@ def timed(fn):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--draft", default="al-jshen/FlashMap-Qwen3-8B")
+    parser.add_argument("--draft", default="j-shen/FlashMap-Qwen3-8B")
     parser.add_argument("--target", default="Qwen/Qwen3-8B")
     parser.add_argument("--dataset", default="gsm8k", help="gsm8k, humaneval, mt-bench or a .jsonl file")
     parser.add_argument("--num-prompts", type=int, default=16)

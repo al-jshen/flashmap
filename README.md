@@ -17,8 +17,8 @@ the [SGLang](#serve-with-sglang) or [vLLM](#serve-with-vllm) integration.
 
 | Drafter | Target | Drafter parameters |
 |---|---|---|
-| [al-jshen/FlashMap-Qwen3-8B](https://huggingface.co/al-jshen/FlashMap-Qwen3-8B) | [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) | 500M |
-| [al-jshen/FlashMap-Qwen3-4B](https://huggingface.co/al-jshen/FlashMap-Qwen3-4B) | [Qwen/Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) | 475M |
+| [j-shen/FlashMap-Qwen3-8B](https://huggingface.co/j-shen/FlashMap-Qwen3-8B) | [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) | 500M |
+| [j-shen/FlashMap-Qwen3-4B](https://huggingface.co/j-shen/FlashMap-Qwen3-4B) | [Qwen/Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) | 475M |
 
 ## Install
 
@@ -40,7 +40,7 @@ from flashmap import FlashMapDraftModel
 
 tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B")
 target = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B", dtype=torch.bfloat16).cuda().eval()
-draft = FlashMapDraftModel.from_pretrained("al-jshen/FlashMap-Qwen3-8B", dtype=torch.bfloat16).cuda().eval()
+draft = FlashMapDraftModel.from_pretrained("j-shen/FlashMap-Qwen3-8B", dtype=torch.bfloat16).cuda().eval()
 
 messages = [{"role": "user", "content": "How many positive whole-number divisors does 196 have?"}]
 input_ids = tokenizer.apply_chat_template(
@@ -71,7 +71,7 @@ uv pip install "sglang==0.5.20"
 uv pip install --no-deps "git+https://github.com/al-jshen/SpecForge@flashmap"
 
 # Export the release checkpoint for SGLang (64k-token draft vocabulary by default)
-hf download al-jshen/FlashMap-Qwen3-8B --local-dir FlashMap-Qwen3-8B
+hf download j-shen/FlashMap-Qwen3-8B --local-dir FlashMap-Qwen3-8B
 python -m specforge.export.flashmap --src FlashMap-Qwen3-8B --output-dir FlashMap-Qwen3-8B-sglang
 
 SGLANG_EXTERNAL_MODEL_PACKAGE=specforge.serving.sglang \
@@ -99,7 +99,7 @@ source .venv-vllm/bin/activate
 uv pip install "vllm==0.31.*" "git+https://github.com/al-jshen/speculators@flashmap"
 
 # Convert the release checkpoint to the speculators format (64k-token draft vocabulary by default)
-hf download al-jshen/FlashMap-Qwen3-8B --local-dir FlashMap-Qwen3-8B
+hf download j-shen/FlashMap-Qwen3-8B --local-dir FlashMap-Qwen3-8B
 speculators convert ./FlashMap-Qwen3-8B --algorithm flashmap --verifier Qwen/Qwen3-8B \
     --output-path ./FlashMap-Qwen3-8B-speculators
 

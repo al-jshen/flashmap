@@ -28,8 +28,8 @@ test = ["pytest"]
 Homepage = "https://jshen.net/flashmap"
 Repository = "https://github.com/al-jshen/flashmap"
 Documentation = "https://github.com/al-jshen/flashmap/blob/master/docs/details.md"
-"Model (Qwen3-8B)" = "https://huggingface.co/al-jshen/FlashMap-Qwen3-8B"
-"Model (Qwen3-4B)" = "https://huggingface.co/al-jshen/FlashMap-Qwen3-4B"
+"Model (Qwen3-8B)" = "https://huggingface.co/j-shen/FlashMap-Qwen3-8B"
+"Model (Qwen3-4B)" = "https://huggingface.co/j-shen/FlashMap-Qwen3-4B"
 
 [tool.setuptools]
 packages = ["flashmap"]
