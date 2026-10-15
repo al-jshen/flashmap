@@ -48,7 +48,6 @@ print(f"acceptance length: {output.acceptance_length:.2f}")
 `num_steps=2` drafts with two jumps of the flow map (trading speed for accuracy). 
 The model code also ships with the weights, so `AutoModel.from_pretrained(..., trust_remote_code=True)` works without this
 package. 
-The [examples](examples/) measure acceptance length and speedup on GSM8K, HumanEval and MT-Bench.
 
 ## Serve with SGLang
 
@@ -62,9 +61,6 @@ uv pip install "sglang==0.5.20" "flashmap[sglang] @ git+https://github.com/al-js
 python -m sglang.launch_server --model-path Qwen/Qwen3-8B \
   --speculative-algorithm DSPARK --speculative-draft-model-path j-shen/FlashMap-Qwen3-8B
 ```
-
-The drafter uses its 64k-token draft vocabulary and its 16-token block by default, and sampling at
-`temperature > 0` needs no extra option. Set `FLASHMAP_NUM_STEPS=2` when launching to draft with two jumps.
 
 [Our SpecForge fork](https://github.com/al-jshen/SpecForge/tree/flashmap) trains FlashMap with SGLang's
 training library, and its `specforge export --to hf` writes a trained map as a release folder that
@@ -82,10 +78,7 @@ uv pip install "vllm==0.31.*" "flashmap[vllm] @ git+https://github.com/al-jshen/
 vllm serve Qwen/Qwen3-8B --speculative-config '{"model": "j-shen/FlashMap-Qwen3-8B", "num_speculative_tokens": 16}'
 ```
 
-The drafter uses its 64k-token draft vocabulary by default. For sampling at `temperature > 0`, add
-`"draft_sample_method": "probabilistic"` to the speculative config, so that drafts are sampled from
-FlashMap's own distribution (the output follows the target's distribution either way; this raises
-acceptance). Set `FLASHMAP_NUM_STEPS=2` when launching to draft with two jumps.
+For sampling at `temperature > 0`, add `"draft_sample_method": "probabilistic"` to the speculative config.
 
 Drafters you train yourself ([Training](#training)) are served the same way once converted to the release
 format.
