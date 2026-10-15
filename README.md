@@ -2,13 +2,7 @@
 
 **[Project page](https://jshen.net/flashmap)** · **Paper** (coming soon) · **[Models](#models)**
 
-FlashMap is a drafter for lossless speculative decoding. Like [DFlash](https://github.com/z-lab/dflash), it
-proposes a whole block of 16 tokens in one forward pass of a small network conditioned on the target model's
-hidden states. Unlike DFlash, which predicts each token of the block independently, FlashMap draws the block
-from a flow map ([Flow Map Language Models](https://arxiv.org/abs/2602.16813)), which jumps from Gaussian
-noise to the whole block in a single step and can capture dependencies between its tokens. The target model
-verifies every block, so the output is exactly the target's own. On Qwen3-8B, FlashMap decodes up to 6x faster
-than the target alone.
+FlashMap is a drafter for lossless speculative decoding. It proposes a whole block of K tokens in a single pass. Unlike discrete diffusion drafters, which predict each token of the block independently and ignore inter-token dependencies, FlashMap uses a flow map ([Flow Map Language Models](https://arxiv.org/abs/2602.16813)), which jumps from Gaussian noise to the whole block in a single step and can capture dependencies between its tokens. On Qwen3-8B, FlashMap decodes up to 6x faster than the target alone.
 
 This repository is a small, standalone implementation for Hugging Face `transformers`. For fast serving, use
 the [SGLang](#serve-with-sglang) or [vLLM](#serve-with-vllm) integration.
@@ -52,17 +46,15 @@ print(tokenizer.decode(output.sequences[0, input_ids.shape[1]:], skip_special_to
 print("acceptance length:", output.acceptance_length)
 ```
 
-`num_steps=2` drafts with two jumps of the flow map: each draft is slower, but more of its tokens are
-accepted. At `temperature > 0` the output follows the target's sampling distribution exactly. The model code
-also ships with the weights, so `AutoModel.from_pretrained(..., trust_remote_code=True)` works without this
-package. The [examples](examples/) measure acceptance length and speedup on GSM8K, HumanEval and MT-Bench,
+`num_steps=2` drafts with two jumps of the flow map (trading speed for accuracy). 
+The model code also ships with the weights, so `AutoModel.from_pretrained(..., trust_remote_code=True)` works without this
+package. 
+The [examples](examples/) measure acceptance length and speedup on GSM8K, HumanEval and MT-Bench,
 and [docs/details.md](docs/details.md) documents the API and how the drafter works.
 
 ## Serve with SGLang
 
 The SGLang integration lives in [our SpecForge fork](https://github.com/al-jshen/SpecForge/tree/flashmap).
-It needs `sglang==0.5.20` exactly and tensor parallelism 1. SpecForge is installed without its dependencies,
-because it pins a different sglang version for training.
 
 ```bash
 uv venv --python 3.12 .venv-sglang
@@ -70,7 +62,7 @@ source .venv-sglang/bin/activate
 uv pip install "sglang==0.5.20"
 uv pip install --no-deps "git+https://github.com/al-jshen/SpecForge@flashmap"
 
-# Export the release checkpoint for SGLang (64k-token draft vocabulary by default)
+# Export the release checkpoint for SGLang
 hf download al-jshen/FlashMap-Qwen3-8B --local-dir FlashMap-Qwen3-8B
 python -m specforge.export.flashmap --src FlashMap-Qwen3-8B --output-dir FlashMap-Qwen3-8B-sglang
 
@@ -89,16 +81,14 @@ covers the options, tree drafting and the full benchmarks.
 
 ## Serve with vLLM
 
-The vLLM integration is a plugin in [our speculators fork](https://github.com/al-jshen/speculators/tree/flashmap),
-which vLLM loads automatically, so vLLM itself is unchanged. It needs vLLM 0.31.x, tensor parallelism 1 and
-vLLM's FlashAttention backend; each requirement is checked when the drafter loads.
+The vLLM integration is a plugin in [our speculators fork](https://github.com/al-jshen/speculators/tree/flashmap).
 
 ```bash
 uv venv --python 3.12 .venv-vllm
 source .venv-vllm/bin/activate
 uv pip install "vllm==0.31.*" "git+https://github.com/al-jshen/speculators@flashmap"
 
-# Convert the release checkpoint to the speculators format (64k-token draft vocabulary by default)
+# Convert the release checkpoint to the speculators format
 hf download al-jshen/FlashMap-Qwen3-8B --local-dir FlashMap-Qwen3-8B
 speculators convert ./FlashMap-Qwen3-8B --algorithm flashmap --verifier Qwen/Qwen3-8B \
     --output-path ./FlashMap-Qwen3-8B-speculators
@@ -119,8 +109,7 @@ covers the requirements, options and full benchmarks.
 
 ### Sending requests
 
-Both servers expose an OpenAI-compatible API, SGLang on port 30000 and vLLM on port 8000. The results below
-were measured with Qwen3's thinking mode turned off.
+Both servers expose an OpenAI-compatible API, SGLang on port 30000 and vLLM on port 8000. 
 
 ```python
 from openai import OpenAI
@@ -144,8 +133,6 @@ recipes are in the speculators fork
 and the SpecForge fork ([FlashMap](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/concepts/FlashMap.md)).
 [`scripts/convert_checkpoint.py`](scripts/convert_checkpoint.py) turns a trained checkpoint into a release
 folder for this package ([details](docs/details.md#converting-checkpoints)).
-
-
 
 ## License
 
