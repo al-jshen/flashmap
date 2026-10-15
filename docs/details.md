@@ -1,7 +1,8 @@
 # FlashMap: API, internals and checks
 
 The details behind the [README](../README.md): the API of the `transformers` implementation, how the drafter
-works, how this implementation was checked, serving with vLLM, and how to convert checkpoints.
+works, how this implementation was checked, serving with SGLang and vLLM, how to convert checkpoints, and
+troubleshooting.
 
 ## Using the drafter
 
@@ -91,9 +92,9 @@ The network (`flashmap/modeling_flashmap.py`) is a 6-block DiT of width 2048:
 ## Checking this implementation
 
 On the same prompts, the acceptance lengths of `spec_generate` match those of DeepSpec's own evaluator, for
-both drafters, one and two steps, at T = 0 and T = 1 (512 new tokens; the first 16 prompts of the paper's
-GSM8K and HumanEval sets and every fifth MT-Bench question; one H100, bfloat16). Even at T = 0 the drafts
-depend on the draft noise, so two runs on 16 prompts differ slightly.
+both drafters, one and two steps, at T = 0 and T = 1 (512 new tokens; the first 16 prompts of the GSM8K and
+HumanEval sets of DFlash's evaluation and every fifth MT-Bench question; one H100, bfloat16). Even at T = 0
+the drafts depend on the draft noise, so two runs on 16 prompts differ slightly.
 
 With the same noise, the draft logits equal DeepSpec's exactly in bfloat16 (on the H100) and to 5e-5 (one
 step) and 9e-4 (two steps) in float32. At temperature 0 the output is the target's own greedy decoding:
@@ -207,24 +208,33 @@ model's own:
 
 The same plugin lives in [our speculators fork](https://github.com/al-jshen/speculators/tree/flashmap)
 (`speculators.models.flashmap.vllm`), which trains FlashMap and is where the integration would be upstreamed
-to vLLM from. That copy also serves speculators checkpoints (`speculators convert`, for another draft
-vocabulary or a DeepSpec checkpoint); its
+to vLLM from. That copy also serves speculators checkpoints (`speculators convert`, for example with another
+draft vocabulary); its
 [vLLM guide](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap.md)
 has the implementation notes. Both register under the plugin name `flashmap`, so install one of them.
 
 ## Converting checkpoints
 
-FlashMap was first trained in a fork of [DeepSpec](https://github.com/deepseek-ai/DeepSpec), and it can also
-be trained with speculators (vLLM) or SpecForge (SGLang); see [Training](../README.md#training).
-`scripts/convert_checkpoint.py` recognizes DeepSpec checkpoints, speculators checkpoints and SpecForge's
-`specforge export --to hf` folders, and writes a release folder for this package: the config (with the
-fields [SGLang](#serving-with-sglang) and [vLLM](#serving-with-vllm) serve it with), the weights without the target's embedding and lm_head,
-the model code and, optionally, a model card and the draft-vocabulary ranking. It checks the weights against the source and against the names and shapes the
-model expects.
+FlashMap can be trained with speculators (vLLM) or SpecForge (SGLang); see [Training](../README.md#training).
+`scripts/convert_checkpoint.py` recognizes speculators checkpoints and SpecForge's `specforge export --to hf`
+folders, and writes a release folder for this package: the config (with the fields
+[SGLang](#serving-with-sglang) and [vLLM](#serving-with-vllm) serve it with), the weights without the target's
+embedding and lm_head, the model code and, optionally, a model card and the draft-vocabulary ranking. It checks
+the weights against the source and against the names and shapes the model expects.
 
 ```bash
 python scripts/convert_checkpoint.py --checkpoint <checkpoint folder> --target-model Qwen/Qwen3-8B \
     --output FlashMap-Qwen3-8B --model-card model_cards/FlashMap-Qwen3-8B.md
 ```
 
-`--target-model` is required for DeepSpec checkpoints, and `--draft-vocab` ships a token-frequency ranking.
+`--draft-vocab` ships a token-frequency ranking, and `--target-model` names the target where the checkpoint's
+config does not. The released drafters were trained with the original research code (not public), built on
+[DeepSpec](https://github.com/deepseek-ai/DeepSpec); the converter also reads its checkpoints, which is how the
+release folders were made.
+
+## Troubleshooting
+
+On hosts without a CUDA toolkit, the engines can fail while compiling their own just-in-time kernels:
+vLLM in FlashInfer's sampler and SGLang in DeepGEMM. This is on the engine side, not in FlashMap. Load a CUDA
+toolkit (with `nvcc`), or turn those kernels off: `VLLM_USE_FLASHINFER_SAMPLER=0` for vLLM and
+`SGLANG_ENABLE_JIT_DEEPGEMM=0` for SGLang.

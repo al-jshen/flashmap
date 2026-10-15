@@ -2,6 +2,9 @@
 base_model: Qwen/Qwen3-4B
 library_name: transformers
 license: apache-2.0
+pipeline_tag: text-generation
+datasets:
+  - mlabonne/open-perfectblend
 tags:
   - flashmap
   - speculative-decoding
@@ -51,7 +54,7 @@ input_ids = tokenizer.apply_chat_template(
 
 output = draft.spec_generate(target, input_ids, max_new_tokens=512, temperature=0.0, num_steps=1)
 print(tokenizer.decode(output.sequences[0, input_ids.shape[1]:], skip_special_tokens=True))
-print("acceptance length:", output.acceptance_length)
+print(f"acceptance length: {output.acceptance_length:.2f}")
 ```
 
 `num_steps=2` drafts with two jumps of the map. The drafter uses the target's token embedding and

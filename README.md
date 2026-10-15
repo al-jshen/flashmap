@@ -34,12 +34,11 @@ is tested with torch 2.9 and 2.13 and with transformers 4.57, 5.10, 5.16 and 5.2
 
 ```python
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from flashmap import FlashMapDraftModel
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B")
 target = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B", dtype=torch.bfloat16).cuda().eval()
-draft = FlashMapDraftModel.from_pretrained("j-shen/FlashMap-Qwen3-8B", dtype=torch.bfloat16).cuda().eval()
+draft = AutoModel.from_pretrained("j-shen/FlashMap-Qwen3-8B", trust_remote_code=True, dtype=torch.bfloat16).cuda().eval()
 
 messages = [{"role": "user", "content": "How many positive whole-number divisors does 196 have?"}]
 input_ids = tokenizer.apply_chat_template(
@@ -48,14 +47,15 @@ input_ids = tokenizer.apply_chat_template(
 
 output = draft.spec_generate(target, input_ids, max_new_tokens=512, temperature=0.0, num_steps=1)
 print(tokenizer.decode(output.sequences[0, input_ids.shape[1]:], skip_special_tokens=True))
-print("acceptance length:", output.acceptance_length)
+print(f"acceptance length: {output.acceptance_length:.2f}")
 ```
 
 `num_steps=2` drafts with two jumps of the flow map: each draft is slower, but more of its tokens are
 accepted. At `temperature > 0` the output follows the target's sampling distribution exactly. The model code
-also ships with the weights, so `AutoModel.from_pretrained(..., trust_remote_code=True)` works without this
-package. The [examples](examples/) measure acceptance length and speedup on GSM8K, HumanEval and MT-Bench,
-and [docs/details.md](docs/details.md) documents the API and how the drafter works.
+ships with the weights, which `trust_remote_code=True` loads. With this package installed, `import flashmap`
+lets `AutoModel` load FlashMap folders without `trust_remote_code`. The [examples](examples/) measure
+acceptance length and speedup on GSM8K, HumanEval and MT-Bench, and [docs/details.md](docs/details.md)
+documents the API and how the drafter works.
 
 ## Serve with SGLang
 

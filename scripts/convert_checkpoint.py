@@ -2,17 +2,17 @@
 
 Three kinds of checkpoint are recognized by their config.json:
 
-* DeepSpec, where FlashMap was first trained under the name "DFlashier flow map"
-  (github.com/al-jshen/DeepSpec, a fork of github.com/deepseek-ai/DeepSpec). Its own
-  weight names, RMSNorm scales stored as ``scale`` for ``1 + scale``, fused key/value
-  projections, and frozen copies of the target's embedding and lm_head.
+* DeepSpec format: checkpoints of the original research code (not public), built on
+  DeepSpec, where the released drafters were trained. They have their own weight names,
+  RMSNorm scales stored as ``scale`` for ``1 + scale``, fused key/value projections, and
+  frozen copies of the target's embedding and lm_head.
 * speculators (vLLM's training library): FlashMap's weight names, a speculators
   config (``speculators_model_type: "flashmap"``), and optionally ``d2t``/``t2d``
   draft-vocabulary maps, which the standalone model does not use.
 * SpecForge (SGLang's training library), exported with ``specforge export --to hf``:
   FlashMap's weight names and config, without the model code.
 
-    python scripts/convert_checkpoint.py --checkpoint <run>/step_23268 --output FlashMap-Qwen3-8B \
+    python scripts/convert_checkpoint.py --checkpoint <checkpoint> --output FlashMap-Qwen3-8B \
         --target-model Qwen/Qwen3-8B --model-card model_cards/FlashMap-Qwen3-8B.md \
         --draft-vocab <ranking>.safetensors
 
