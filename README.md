@@ -2,12 +2,7 @@
 
 **[Project page](https://jshen.net/flashmap)** · **Paper** (coming soon) · **[Models](#models)**
 
-FlashMap is a drafter for lossless speculative decoding. Like [DFlash](https://github.com/z-lab/dflash), it
-proposes a whole block of 16 tokens in one forward pass of a small network conditioned on the target model's
-hidden states. Unlike DFlash, which predicts each token of the block independently, FlashMap draws the block
-from a flow map ([Flow Map Language Models](https://arxiv.org/abs/2602.16813)), which jumps from Gaussian
-noise to the whole block in a single step and can capture dependencies between its tokens. The target model
-verifies every block, so the output is exactly the target's own.
+FlashMap is a drafter for lossless speculative decoding. It proposes a whole block of K tokens in a single pass. Unlike discrete diffusion drafters, which predict each token of the block independently and ignore inter-token dependencies, FlashMap uses a flow map ([Flow Map Language Models](https://arxiv.org/abs/2602.16813)), which jumps from Gaussian noise to the whole block in a single step and can capture dependencies between its tokens. On Qwen3-8B, FlashMap decodes up to 6x faster than the target alone.
 
 This repository is a small, standalone implementation for Hugging Face `transformers`. For fast serving, use
 the [SGLang](#serve-with-sglang) or [vLLM](#serve-with-vllm) integration.
@@ -50,17 +45,14 @@ print(tokenizer.decode(output.sequences[0, input_ids.shape[1]:], skip_special_to
 print(f"acceptance length: {output.acceptance_length:.2f}")
 ```
 
-`num_steps=2` drafts with two jumps of the flow map: each draft is slower, but more of its tokens are
-accepted. At `temperature > 0` the output follows the target's sampling distribution exactly. The model code
-ships with the weights, which `trust_remote_code=True` loads. With this package installed, `import flashmap`
-lets `AutoModel` load FlashMap folders without `trust_remote_code`. The [examples](examples/) measure
-acceptance length and speedup on GSM8K, HumanEval and MT-Bench, and [docs/details.md](docs/details.md)
-documents the API and how the drafter works.
+`num_steps=2` drafts with two jumps of the flow map (trading speed for accuracy). 
+The model code also ships with the weights, so `AutoModel.from_pretrained(..., trust_remote_code=True)` works without this
+package. 
+The [examples](examples/) measure acceptance length and speedup on GSM8K, HumanEval and MT-Bench.
 
 ## Serve with SGLang
 
-The `sglang` extra adds a plugin that SGLang loads automatically, so SGLang itself is unchanged and the
-release checkpoint is served as it is. It needs `sglang==0.5.20` exactly and tensor parallelism 1.
+The SGLang integration is a plugin in this package (the `sglang` extra), which SGLang loads automatically.
 
 ```bash
 uv venv --python 3.12 .venv-sglang
@@ -73,7 +65,6 @@ python -m sglang.launch_server --model-path Qwen/Qwen3-8B \
 
 The drafter uses its 64k-token draft vocabulary and its 16-token block by default, and sampling at
 `temperature > 0` needs no extra option. Set `FLASHMAP_NUM_STEPS=2` when launching to draft with two jumps.
-[Serving with SGLang](docs/details.md#serving-with-sglang) covers the options, including tree drafting.
 
 [Our SpecForge fork](https://github.com/al-jshen/SpecForge/tree/flashmap) trains FlashMap with SGLang's
 training library, and its `specforge export --to hf` writes a trained map as a release folder that
@@ -81,9 +72,7 @@ training library, and its `specforge export --to hf` writes a trained map as a r
 
 ## Serve with vLLM
 
-The `vllm` extra adds a plugin that vLLM loads automatically, so vLLM itself is unchanged and the release
-checkpoint is served as it is. It needs vLLM 0.31.x, tensor parallelism 1 and vLLM's FlashAttention backend;
-each requirement is checked when the drafter loads.
+The vLLM integration is a plugin in this package (the `vllm` extra), which vLLM loads automatically.
 
 ```bash
 uv venv --python 3.12 .venv-vllm
@@ -95,14 +84,15 @@ vllm serve Qwen/Qwen3-8B --speculative-config '{"model": "j-shen/FlashMap-Qwen3-
 
 The drafter uses its 64k-token draft vocabulary by default. For sampling at `temperature > 0`, add
 `"draft_sample_method": "probabilistic"` to the speculative config, so that drafts are sampled from
-FlashMap's own distribution. [Serving with vLLM](docs/details.md#serving-with-vllm) covers the options.
+FlashMap's own distribution (the output follows the target's distribution either way; this raises
+acceptance). Set `FLASHMAP_NUM_STEPS=2` when launching to draft with two jumps.
 
 Drafters you train yourself ([Training](#training)) are served the same way once converted to the release
 format.
-### Sending requests
 
-Both servers expose an OpenAI-compatible API, SGLang on port 30000 and vLLM on port 8000. The example turns
-Qwen3's thinking mode off.
+## Sending requests
+
+Both servers expose an OpenAI-compatible API, SGLang on port 30000 and vLLM on port 8000. 
 
 ```python
 from openai import OpenAI
@@ -125,18 +115,7 @@ recipes are in the speculators fork
 and the SpecForge fork ([FlashMap](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/concepts/FlashMap.md)).
 Both write a trained map as a release folder for this package (`speculators convert --algorithm flashmap`,
 `specforge export --to hf`), and [`scripts/convert_checkpoint.py`](scripts/convert_checkpoint.py) converts
-speculators and SpecForge checkpoints too ([details](docs/details.md#converting-checkpoints)).
-
-## Citation
-
-```bibtex
-@misc{flashmap2026,
-  title  = {{FlashMap}: Flow Map Speculative Decoding},
-  author = {Shen, Jeff and Zhou, Zhejian and Lee, Ryan and May, Jonathan and Ho, Shirley},
-  year   = {2026},
-  note   = {Preprint, coming soon}
-}
-```
+speculators and SpecForge checkpoints too (`python scripts/convert_checkpoint.py --help`).
 
 ## License
 

@@ -67,7 +67,7 @@ has the API, examples and an installable package (`uv pip install git+https://gi
 The code above is written for clarity rather than speed. For serving, use the SGLang or vLLM integration
 (tensor parallelism 1). Both draft over the top 65,536 tokens of `draft_vocab.safetensors` by default.
 
-SGLang 0.5.20 exactly, with the [SGLang plugin](https://github.com/al-jshen/flashmap/blob/master/docs/details.md#serving-with-sglang)
+SGLang 0.5.20 exactly, with the [SGLang plugin](https://github.com/al-jshen/flashmap#serve-with-sglang)
 of the flashmap package, which serves this folder as it is:
 
 ```bash
@@ -76,7 +76,7 @@ python -m sglang.launch_server --model-path Qwen/Qwen3-8B \
   --speculative-algorithm DSPARK --speculative-draft-model-path j-shen/FlashMap-Qwen3-8B
 ```
 
-vLLM 0.31.x, with the [vLLM plugin](https://github.com/al-jshen/flashmap/blob/master/docs/details.md#serving-with-vllm)
+vLLM 0.31.x, with the [vLLM plugin](https://github.com/al-jshen/flashmap#serve-with-vllm)
 of the flashmap package, which serves this folder as it is:
 
 ```bash

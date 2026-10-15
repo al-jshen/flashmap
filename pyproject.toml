@@ -43,7 +43,7 @@ flashmap = "flashmap.vllm:register"
 [project.urls]
 Homepage = "https://jshen.net/flashmap"
 Repository = "https://github.com/al-jshen/flashmap"
-Documentation = "https://github.com/al-jshen/flashmap/blob/master/docs/details.md"
+Documentation = "https://github.com/al-jshen/flashmap#readme"
 "Model (Qwen3-8B)" = "https://huggingface.co/j-shen/FlashMap-Qwen3-8B"
 "Model (Qwen3-4B)" = "https://huggingface.co/j-shen/FlashMap-Qwen3-4B"
 
