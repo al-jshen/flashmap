@@ -183,6 +183,17 @@ def test_specforge_with_draft_vocab(tmp_path):
     with safe_open(str(tmp_path / "out" / "draft_vocab.safetensors"), "pt") as handle:
         assert "cache" not in handle.metadata() and handle.metadata()["samples"] == "50"
 
+    # vLLM's fields: a speculators-style header and the restricted draft vocabulary
+    released = json.loads((tmp_path / "out" / "config.json").read_text())
+    assert released["speculators_model_type"] == "flashmap"
+    assert released["speculators_config"]["verifier"]["name_or_path"] == "toy/target"
+    assert released["speculators_config"]["proposal_methods"][0]["speculative_tokens"] == 4
+    assert released["transformer_layer_config"] == {} and released["draft_vocab_size"] == 64
+    # a release converts again as itself, not as a speculators checkpoint
+    convert_checkpoint.convert(tmp_path / "out", tmp_path / "again", dtype=torch.float32)
+    check_release(tmp_path / "again", weights, target_layer_ids=TARGET_LAYER_IDS, jump_grids=config.jump_grids)
+    assert "draft_vocab_size" not in json.loads((tmp_path / "again" / "config.json").read_text())
+
 
 def test_wrong_weights_are_caught(tmp_path):
     config, weights = toy_weights()

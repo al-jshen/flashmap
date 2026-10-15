@@ -22,6 +22,9 @@ trust_remote_code=True)` works) and, optionally, the model card as README.md and
 draft_vocab.safetensors, the target's token-frequency ranking that serving
 integrations use to restrict the draft vocabulary. The saved weights are checked
 against the source and against the names and shapes the model expects.
+
+config.json also carries the fields with which vLLM serves the folder as it is
+(with `pip install flashmap[vllm]`, see `vllm_fields`).
 """
 
 import argparse
@@ -200,6 +203,45 @@ def from_flashmap(source: dict, target_model: str | None) -> dict:
     return fields
 
 
+# ---- serving ------------------------------------------------------------------------
+
+# vLLM drafts over the first DRAFT_VOCAB_SIZE ids of draft_vocab.safetensors, when shipped.
+DRAFT_VOCAB_SIZE = 65536
+
+
+def vllm_fields(block_size: int, target_model: str, target_architectures: list, draft_vocab_size: int | None) -> dict:
+    """config.json fields for vLLM: a speculators-style header (vLLM's format for draft
+    models, which flashmap's vLLM plugin maps onto the fields above; the DiT's dimensions
+    stay where they are, so its `transformer_layer_config` is empty) and the size of the
+    restricted draft vocabulary, if any."""
+    fields = {
+        "speculators_model_type": "flashmap",
+        "speculators_config": {
+            "algorithm": "flashmap",
+            "default_proposal_method": "greedy",
+            "proposal_methods": [
+                {"proposal_type": "greedy", "speculative_tokens": block_size, "accept_tolerance": 0.0, "verifier_accept_k": 1}
+            ],
+            "verifier": {"name_or_path": target_model, "architectures": list(target_architectures)},
+        },
+        "transformer_layer_config": {},
+    }
+    if draft_vocab_size:
+        fields["draft_vocab_size"] = draft_vocab_size
+    return fields
+
+
+def target_architectures(target_model: str) -> list:
+    """The target's architectures from its config.json, or [] if it is not reachable
+    (vLLM reads only the target's name)."""
+    try:
+        from transformers import PretrainedConfig
+
+        return PretrainedConfig.get_config_dict(target_model)[0].get("architectures") or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
 # ---- all ----------------------------------------------------------------------------
 
 
@@ -247,10 +289,10 @@ def convert(checkpoint, output, target_model=None, model_card=None, draft_vocab=
     checkpoint, output = Path(checkpoint), Path(output)
     source_config = json.loads((checkpoint / "config.json").read_text())
     source = load_file(str(checkpoint / "model.safetensors"))
-    if source_config.get("speculators_model_type") == "flashmap":
-        kind, fields, weights = "speculators", from_speculators(source_config, target_model), source
-    elif source_config.get("model_type") == "flashmap":
+    if source_config.get("model_type") == "flashmap":  # before speculators: a release has vllm_fields
         kind, fields, weights = "SpecForge/FlashMap", from_flashmap(source_config, target_model), source
+    elif source_config.get("speculators_model_type") == "flashmap":
+        kind, fields, weights = "speculators", from_speculators(source_config, target_model), source
     elif "dit_embed_dim" in source_config:
         kind, fields, weights = "DeepSpec", from_deepspec(source_config, target_model), deepspec_weights(source)
     else:
@@ -263,6 +305,14 @@ def convert(checkpoint, output, target_model=None, model_card=None, draft_vocab=
         "AutoModel": "modeling_flashmap.FlashMapDraftModel",
     }
     check_weights(config, weights)
+    vocab_size = None
+    if draft_vocab:
+        with safe_open(draft_vocab, "pt") as handle:
+            vocab_size = min(DRAFT_VOCAB_SIZE, handle.get_slice("ids").get_shape()[0])
+    for key, value in vllm_fields(
+        config.block_size, config.target_model, target_architectures(config.target_model), vocab_size
+    ).items():
+        setattr(config, key, value)
 
     output.mkdir(parents=True, exist_ok=True)
     save_file(weights, str(output / "model.safetensors"), metadata={"format": "pt"})

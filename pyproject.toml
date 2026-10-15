@@ -23,6 +23,11 @@ classifiers = [
 [project.optional-dependencies]
 benchmark = ["datasets"]
 test = ["pytest"]
+# Serve FlashMap drafters in vLLM (a vLLM general plugin, registered below).
+vllm = ["vllm>=0.31,<0.32"]
+
+[project.entry-points."vllm.general_plugins"]
+flashmap = "flashmap.vllm:register"
 
 [project.urls]
 Homepage = "https://jshen.net/flashmap"
@@ -32,4 +37,4 @@ Documentation = "https://github.com/al-jshen/flashmap/blob/master/docs/details.m
 "Model (Qwen3-4B)" = "https://huggingface.co/j-shen/FlashMap-Qwen3-4B"
 
 [tool.setuptools]
-packages = ["flashmap"]
+packages = ["flashmap", "flashmap.vllm"]
