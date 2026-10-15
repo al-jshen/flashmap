@@ -13,8 +13,7 @@ Three kinds of checkpoint are recognized by their config.json:
   FlashMap's weight names and config, without the model code.
 
     python scripts/convert_checkpoint.py --checkpoint <checkpoint> --output FlashMap-Qwen3-8B \
-        --target-model Qwen/Qwen3-8B --model-card model_cards/FlashMap-Qwen3-8B.md \
-        --draft-vocab <ranking>.safetensors
+        --target-model Qwen/Qwen3-8B --model-card <card>.md --draft-vocab <ranking>.safetensors
 
 The output folder holds config.json, model.safetensors (bf16, without the target's
 embedding and lm_head), the model code (so that `AutoModel.from_pretrained(...,
