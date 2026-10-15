@@ -97,11 +97,8 @@ The drafter uses its 64k-token draft vocabulary by default. For sampling at `tem
 `"draft_sample_method": "probabilistic"` to the speculative config, so that drafts are sampled from
 FlashMap's own distribution. [Serving with vLLM](docs/details.md#serving-with-vllm) covers the options.
 
-The same plugin lives in [our speculators fork](https://github.com/al-jshen/speculators/tree/flashmap), which
-trains FlashMap and is where the integration would be upstreamed to vLLM from
-([vLLM guide](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap.md)).
-Serving needs only `flashmap[vllm]`.
-
+Drafters you train yourself ([Training](#training)) are served the same way once converted to the release
+format.
 ### Sending requests
 
 Both servers expose an OpenAI-compatible API, SGLang on port 30000 and vLLM on port 8000. The example turns
@@ -126,8 +123,9 @@ FlashMap is trained in two stages: a flow over one-hot token blocks, then a flow
 recipes are in the speculators fork
 ([Training FlashMap](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap_training.md))
 and the SpecForge fork ([FlashMap](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/concepts/FlashMap.md)).
-[`scripts/convert_checkpoint.py`](scripts/convert_checkpoint.py) turns a trained checkpoint into a release
-folder for this package ([details](docs/details.md#converting-checkpoints)).
+The speculators fork converts its checkpoints into a release folder for this package
+(`speculators convert --algorithm flashmap`), and [`scripts/convert_checkpoint.py`](scripts/convert_checkpoint.py)
+converts speculators and SpecForge checkpoints ([details](docs/details.md#converting-checkpoints)).
 
 ## License
 

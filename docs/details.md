@@ -206,16 +206,16 @@ model's own:
 | `transformer_layer_config` | `{}` | required by vLLM's format; the plugin reads the DiT's sizes from the top-level fields |
 | `draft_vocab_size` | `65536` | size of the draft head's vocabulary, taken from `draft_vocab.safetensors` |
 
-The same plugin lives in [our speculators fork](https://github.com/al-jshen/speculators/tree/flashmap)
-(`speculators.models.flashmap.vllm`), which trains FlashMap and is where the integration would be upstreamed
-to vLLM from. That copy also serves speculators checkpoints (`speculators convert`, for example with another
-draft vocabulary); its
-[vLLM guide](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap.md)
-has the implementation notes. Both register under the plugin name `flashmap`, so install one of them.
+The plugin is the only vLLM integration:
+[our speculators fork](https://github.com/al-jshen/speculators/tree/flashmap) trains FlashMap and converts its
+checkpoints to this release format, but does not serve them.
 
 ## Converting checkpoints
 
 FlashMap can be trained with speculators (vLLM) or SpecForge (SGLang); see [Training](../README.md#training).
+The speculators fork writes a release folder itself (`speculators convert <flow-map checkpoint> --algorithm
+flashmap --verifier <target> --output-path <folder>`, see its
+[Training FlashMap](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap_training.md#serving-the-result)).
 `scripts/convert_checkpoint.py` recognizes speculators checkpoints and SpecForge's `specforge export --to hf`
 folders, and writes a release folder for this package: the config (with the fields
 [SGLang](#serving-with-sglang) and [vLLM](#serving-with-vllm) serve it with), the weights without the target's

@@ -19,8 +19,8 @@ warning and leaves vLLM untouched.
 Serve with ``vllm serve <target> --speculative-config '{"model": "<FlashMap folder or
 Hub id>", "num_speculative_tokens": 16}'``; the plugin fills in ``"method": "dflash"``.
 
-The same plugin lives in the speculators fork (``speculators.models.flashmap.vllm``),
-which also trains FlashMap drafters and is where it would be upstreamed to vLLM from.
+The speculators fork trains FlashMap drafters and converts them to the release format;
+it has no serving code of its own.
 """
 
 import logging
