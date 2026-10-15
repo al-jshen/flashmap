@@ -84,8 +84,8 @@ uv pip install "vllm==0.31.*" "flashmap[vllm] @ git+https://github.com/al-jshen/
 vllm serve Qwen/Qwen3-8B --speculative-config '{"model": "j-shen/FlashMap-Qwen3-8B", "num_speculative_tokens": 16}'
 ```
 
-Use a separate environment for each engine. The linked guides cover the options, such as sampling at
-temperature > 0 and two-jump drafting.
+Use a separate environment for each engine. The linked README sections cover the options, such as
+sampling at temperature > 0 and two-jump drafting.
 
 ## Files
 
@@ -97,11 +97,13 @@ temperature > 0 and two-jump drafting.
 
 ## Model details
 
-- Target: Qwen/Qwen3-8B (hidden states of layers 1, 9, 17, 25 and 33; token embedding and lm_head).
+- Target: Qwen/Qwen3-8B (hidden states of decoder layers 1, 9, 17, 25 and 33, counting from 0; token
+  embedding and lm_head).
 - Drafter: 6 DiT blocks, width 2048, 16 heads, 500M parameters, block size 16, bf16.
-- Training: a flow over one-hot token blocks trained on 500K samples of
-  [Open-PerfectBlend](https://huggingface.co/datasets/mlabonne/open-perfectblend), then distilled into a
-  flow map with the semigroup objective of Flow Map Language Models.
+- Training: a flow over one-hot token blocks trained on 500K prompts from
+  [Open-PerfectBlend](https://huggingface.co/datasets/mlabonne/open-perfectblend) with responses regenerated
+  by Qwen3-8B with thinking disabled, then distilled into a flow map with the semigroup objective of Flow
+  Map Language Models. Acceptance with thinking enabled is untested.
 
 ## License
 
