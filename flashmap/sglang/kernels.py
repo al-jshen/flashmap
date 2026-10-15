@@ -81,7 +81,7 @@ def _scale(x, scale):
     return (x * scale.to(tl.bfloat16).to(tl.float32)).to(tl.bfloat16).to(tl.float32)
 
 
-@torch.library.custom_op("flashmap::block_self_attention", mutates_args=())
+@torch.library.custom_op("flashmap_sglang::block_self_attention", mutates_args=())
 def block_self_attention(
     qkv: torch.Tensor,
     q_norm: torch.Tensor,
@@ -168,7 +168,7 @@ def _rms_norm_rope_kernel(
     tl.store(out + 2 * i + 1, (odd * cos + even * sin).to(tl.bfloat16))
 
 
-@torch.library.custom_op("flashmap::rms_norm_rope", mutates_args=())
+@torch.library.custom_op("flashmap_sglang::rms_norm_rope", mutates_args=())
 def rms_norm_rope(
     x: torch.Tensor, weight: torch.Tensor, freqs: torch.Tensor, eps: float
 ) -> torch.Tensor:

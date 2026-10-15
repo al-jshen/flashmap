@@ -20,7 +20,7 @@ uv pip install -e ".[benchmark,test]"
 python examples/generate.py --draft j-shen/FlashMap-Qwen3-8B --target Qwen/Qwen3-8B --prompt "..."
 python examples/benchmark.py --draft j-shen/FlashMap-Qwen3-8B --target Qwen/Qwen3-8B \
     --dataset gsm8k --num-prompts 16 --baseline
-python -m pytest tests   # CPU tests on tiny random models
+python -m pytest tests   # tiny random models (GPU and engine tests skip when unavailable)
 ```
 
 With the package installed, `import flashmap` registers FlashMap with `AutoModel`, which then loads FlashMap

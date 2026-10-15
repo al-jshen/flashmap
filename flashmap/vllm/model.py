@@ -73,7 +73,7 @@ logger = init_logger(__name__)
 __all__ = ["FlashMapDraftModel", "FlashMapModel"]
 
 
-@torch.library.custom_op("flashmap::paged_cross_attention", mutates_args=())
+@torch.library.custom_op("flashmap_vllm::paged_cross_attention", mutates_args=())
 def paged_cross_attention(
     query: torch.Tensor,
     kv_cache: torch.Tensor,

@@ -121,7 +121,7 @@ def rope_freqs(positions: torch.Tensor, head_dim: int, theta: float) -> torch.Te
 
 
 # A custom op, so torch.compile traces the draft step through it in one graph.
-@torch.library.custom_op("flashmap::paged_cross_attention", mutates_args=())
+@torch.library.custom_op("flashmap_sglang::paged_cross_attention", mutates_args=())
 def _paged_cross_attention(
     query: torch.Tensor,
     key_buffer: torch.Tensor,
@@ -149,7 +149,7 @@ def _(query, key_buffer, value_buffer, cache_seqlens, page_table, scheduler_meta
 
 
 @torch.library.custom_op(
-    "flashmap::paged_cross_attention_fp8", mutates_args=()
+    "flashmap_sglang::paged_cross_attention_fp8", mutates_args=()
 )
 def _paged_cross_attention_fp8(
     query: torch.Tensor,

@@ -45,7 +45,7 @@ def _rms_norm_kernel(x_ptr, weight_ptr, out_ptr, n_cols, eps, BLOCK: tl.constexp
     tl.store(out_ptr + row * n_cols + cols, (x * scale).to(tl.bfloat16), mask=mask)
 
 
-@torch.library.custom_op("flashmap::rms_norm", mutates_args=())
+@torch.library.custom_op("flashmap_vllm::rms_norm", mutates_args=())
 def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     """FlashMap RMSNorm of a bf16 ``x (..., C)``, in one launch."""
     assert x.dtype == torch.bfloat16
@@ -98,7 +98,7 @@ def _rms_norm_rope_kernel(
     tl.store(out + 2 * i + 1, (odd * cos + even * sin).to(tl.bfloat16))
 
 
-@torch.library.custom_op("flashmap::rms_norm_rope", mutates_args=())
+@torch.library.custom_op("flashmap_vllm::rms_norm_rope", mutates_args=())
 def rms_norm_rope(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -191,7 +191,7 @@ def _block_self_attention_kernel(
     tl.store(out_ptr + (b * T + t) * (H * D) + h * D + d, out.to(tl.bfloat16))
 
 
-@torch.library.custom_op("flashmap::block_self_attention", mutates_args=())
+@torch.library.custom_op("flashmap_vllm::block_self_attention", mutates_args=())
 def block_self_attention(
     qkv: torch.Tensor,
     q_norm: torch.Tensor,
