@@ -9,7 +9,6 @@ if not torch.cuda.is_available():
 
 from flashmap.vllm.kernels import (
     block_self_attention,
-    consensus_path,
     rms_norm,
     rms_norm_rope,
     rope_table,
@@ -198,24 +197,3 @@ def test_write_context_kv_fp8():
                 atol=0.1,
                 rtol=0.07,
             )
-
-
-def _consensus_ref(candidates):
-    alive = list(range(len(candidates)))
-    path = []
-    for d in range(len(candidates[0])):
-        votes = {}
-        for c in alive:
-            votes.setdefault(candidates[c][d], []).append(c)
-        token = max(votes, key=lambda t: (len(votes[t]), -votes[t][0]))
-        path.append(token)
-        alive = votes[token]
-    return path
-
-
-def test_consensus_path():
-    generator = torch.Generator(device=DEVICE).manual_seed(5)
-    for n in (1, 3, 8):
-        tokens = torch.randint(0, 3, (4, n, 16), generator=generator, device=DEVICE)
-        expected = [_consensus_ref(tokens[r].tolist()) for r in range(4)]
-        assert consensus_path(tokens).tolist() == expected

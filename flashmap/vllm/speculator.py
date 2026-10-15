@@ -15,12 +15,9 @@ the first ``num_speculative_tokens`` slots, so verification, which dominates at
 high concurrency, checks fewer tokens.
 """
 
-from typing import Any
-
 import torch
 from torch import nn
 from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
@@ -30,7 +27,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
 
 from flashmap.vllm.fold import split_argmax
-from flashmap.vllm.kernels import consensus_path, scatter_rows
+from flashmap.vllm.kernels import scatter_rows
 
 logger = init_logger(__name__)
 
@@ -91,11 +88,6 @@ class FlashMapSpeculator(DFlashSpeculator):
         model.prepare()
         # Key each query row's noise by its request's seed and its position.
         model.set_noise_keys(self.seeds, self.sample_idx_mapping)
-        if model.max_candidates > 1 and self.draft_logits is not None:
-            raise ValueError(
-                "FLASHMAP_CANDIDATES needs greedy drafting (draft_sample_method "
-                "'greedy', the default)."
-            )
         if self.draft_watermarker is not None and model.hot_ids is not None:
             raise ValueError(
                 "Watermarked drafting needs FlashMap's full draft vocabulary."
@@ -150,42 +142,6 @@ class FlashMapSpeculator(DFlashSpeculator):
         # Record the KV caches' layout (a host-to-device copy) before capturing.
         self.model.cache_layout()
         super().capture()
-
-    def _generate_draft(
-        self,
-        num_reqs: int,
-        num_tokens_padded: int,
-        attn_metadata: dict[str, Any] | None,
-        slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    ) -> None:
-        if self.model.max_candidates <= 1:
-            super()._generate_draft(
-                num_reqs,
-                num_tokens_padded,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-            )
-            return
-        # Several candidate blocks per request: greedy tokens of each, then the
-        # path most of them share.
-        hidden = self._run_model(
-            num_tokens_padded,
-            attn_metadata,
-            slot_mappings,
-            num_tokens_across_dp,
-            cudagraph_runtime_mode,
-        )
-        block = self.num_speculative_steps
-        requests = num_tokens_padded // block
-        tokens = split_argmax(self.model.compute_draft_logits(hidden))
-        if self.model.hot_ids is not None:
-            tokens = self.model.hot_ids[tokens]
-        path = consensus_path(tokens.view(requests, -1, block))
-        self.draft_tokens[:num_reqs] = path[:num_reqs]
 
     def propose(self, *args, **kwargs) -> torch.Tensor:
         return super().propose(*args, **kwargs)[:, : self.num_verify]

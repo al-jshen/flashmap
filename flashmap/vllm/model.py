@@ -284,13 +284,6 @@ class FlashMapDraftModel(nn.Module):
         self.fp8_linears: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         self.kv_fp8 = False
         self.kv_scales: torch.Tensor | None = None
-        # FLASHMAP_CANDIDATES=N: draft up to N blocks per request from
-        # independent noise and propose the path most of them share (greedy
-        # drafting); a batch of B requests drafts min(N, BUDGET // B) each.
-        self.max_candidates = int(os.environ.get("FLASHMAP_CANDIDATES", "1"))
-        self.candidate_budget = int(os.environ.get("FLASHMAP_CANDIDATE_BUDGET", "32"))
-        if self.max_candidates > 1 and self.num_steps != 1:
-            raise ValueError("FLASHMAP_CANDIDATES needs one-jump drafting")
 
     @property
     def layers(self) -> nn.ModuleList:
@@ -802,13 +795,7 @@ class FlashMapDraftModel(nn.Module):
         ).to(weight.dtype)
         return model.x_embed(embedded)
 
-    def _noise(
-        self,
-        positions: torch.Tensor,
-        n_cols: int,
-        requests: int = 0,
-        candidates: int = 1,
-    ) -> torch.Tensor:
+    def _noise(self, positions: torch.Tensor, n_cols: int) -> torch.Tensor:
         tokens = positions.shape[0]
         if self._noise_keys is None:
             noise = torch.randn(
@@ -816,24 +803,9 @@ class FlashMapDraftModel(nn.Module):
             )
             return noise if self.noise_scale == 1.0 else noise * self.noise_scale
         seeds, rows = self._noise_keys
-        if candidates > 1:
-            rows = (
-                rows[: requests * self.block_size]
-                .view(requests, 1, self.block_size)
-                .expand(requests, candidates, self.block_size)
-                .reshape(-1)
-            )
         return seeded_normal(seeds, rows[:tokens], positions, n_cols, self.noise_scale)
 
-    def num_candidates(self, requests: int) -> int:
-        """Candidate blocks per request in a batch of ``requests``."""
-        if self.max_candidates <= 1:
-            return 1
-        return max(
-            1, min(self.max_candidates, self.candidate_budget // max(requests, 1))
-        )
-
-    def _cross_attention_schedule(self, metadata, seqused_k, candidates: int = 1):
+    def _cross_attention_schedule(self, metadata, seqused_k):
         """FlashAttention 3's tile schedule for the step's cross-attention,
         shared by every layer (it depends only on shapes and lengths)."""
         if self.fa_version != 3 or get_scheduler_metadata is None:  # noqa: PLR2004
@@ -841,14 +813,14 @@ class FlashMapDraftModel(nn.Module):
         caches = self.layers[0].cross_attn.attn.kv_cache
         return get_scheduler_metadata(
             batch_size=seqused_k.shape[0],
-            max_seqlen_q=self.block_size * candidates,
+            max_seqlen_q=self.block_size,
             max_seqlen_k=self.max_model_len,
             num_heads_q=self.num_heads,
             num_heads_kv=self.num_heads,
             headdim=self.head_dim,
             cache_seqlens=seqused_k,
             qkv_dtype=current_platform.fp8_dtype() if self.kv_fp8 else self.dtype,
-            cu_seqlens_q=metadata.query_start_loc * candidates,
+            cu_seqlens_q=metadata.query_start_loc,
             page_size=caches.shape[2],
             causal=False,
         )
@@ -860,8 +832,6 @@ class FlashMapDraftModel(nn.Module):
         inputs_embeds: torch.Tensor | None = None,  # noqa: ARG002
     ) -> torch.Tensor:
         tokens = input_ids.shape[0]
-        requests = tokens // self.block_size
-        candidates = self.num_candidates(requests)
         kv_caches = [layer.cross_attn.attn.kv_cache for layer in self.layers]
         metadata = get_forward_context().attn_metadata
         pending, self._pending_context = self._pending_context, None
@@ -876,31 +846,16 @@ class FlashMapDraftModel(nn.Module):
                 pending,
             )
             self._write(kv, write_positions, write_slots)
-            # A request's candidates are adjacent query rows of its
-            # cross-attention, so its context is read once for all of them.
             attention = (
-                metadata.query_start_loc * candidates,
+                metadata.query_start_loc,
                 seqused_k,
                 metadata.block_table,
-                self._cross_attention_schedule(metadata, seqused_k, candidates),
-                self.block_size * candidates,
+                self._cross_attention_schedule(metadata, seqused_k),
+                self.block_size,
             )
 
         if self.num_steps == 1:
-            if candidates == 1:
-                z = self._noise(positions, self.noise_embed.shape[1])
-                return self._one_jump_fn(z, positions, kv_caches, attention)
-            # Rows (request, candidate, slot); noise keyed per candidate.
-            positions = (
-                positions.view(requests, 1, self.block_size)
-                .expand(requests, candidates, self.block_size)
-                .reshape(-1)
-            )
-            offsets = torch.arange(
-                candidates, device=positions.device
-            ).repeat_interleave(self.block_size)
-            noise_keys = positions * candidates + offsets.repeat(requests)
-            z = self._noise(noise_keys, self.noise_embed.shape[1], requests, candidates)
+            z = self._noise(positions, self.noise_embed.shape[1])
             return self._one_jump_fn(z, positions, kv_caches, attention)
 
         # Several jumps (Algorithm 8): x <- X_{t_n, t_n+1}(x) between jumps.

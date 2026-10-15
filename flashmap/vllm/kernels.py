@@ -14,7 +14,6 @@ import triton.language as tl
 
 __all__ = [
     "block_self_attention",
-    "consensus_path",
     "rms_norm",
     "rms_norm_rope",
     "rope_table",
@@ -442,45 +441,3 @@ def scatter_rows(
             dst.stride(1),
             BLOCK=block,
         )
-
-
-@triton.jit
-def _consensus_path_kernel(
-    tokens_ptr,  # (requests, N, K) int64
-    out_ptr,  # (requests, K) int64
-    N: tl.constexpr,
-    NP: tl.constexpr,
-    K: tl.constexpr,
-):
-    # One program per request: walk the candidates' trie from the root, taking
-    # at each depth the child that most surviving candidates share.
-    request = tl.program_id(0).to(tl.int64)
-    c = tl.arange(0, NP)
-    alive = c < N
-    for d in tl.static_range(K):
-        tok = tl.load(tokens_ptr + (request * N + c) * K + d, mask=c < N, other=-1)
-        same = (tok[:, None] == tok[None, :]) & alive[None, :]
-        counts = tl.sum(same.to(tl.int32), axis=1)
-        # Most votes first, then the lowest candidate index.
-        score = tl.where(alive, counts * NP + (NP - 1 - c), -1)
-        best = tl.argmax(score, axis=0)
-        chosen = tl.sum(tl.where(c == best, tok, 0), axis=0)
-        tl.store(out_ptr + request * K + d, chosen)
-        alive = alive & (tok == chosen)
-
-
-def consensus_path(tokens: torch.Tensor) -> torch.Tensor:
-    """For ``tokens (requests, N, K)``, the root-to-leaf path of the candidates'
-    trie that at every depth follows the child the most of the candidates still
-    on the path share (ties to the lowest candidate). Returns ``(requests, K)``."""
-    requests, candidates, length = tokens.shape
-    out = torch.empty(requests, length, dtype=tokens.dtype, device=tokens.device)
-    if requests:
-        _consensus_path_kernel[(requests,)](
-            tokens.contiguous(),
-            out,
-            N=candidates,
-            NP=max(2, triton.next_power_of_2(candidates)),
-            K=length,
-        )
-    return out
