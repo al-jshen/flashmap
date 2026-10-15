@@ -4,12 +4,13 @@
         --dataset gsm8k --num-prompts 16 --max-new-tokens 512
 
 The prompts are the first --num-prompts rows of a Hugging Face dataset (gsm8k, humaneval,
-mt-bench; formatted as in the paper's evaluation, which sampled 80 rows of each), rendered
+mt-bench; formatted as in DFlash's evaluation, which sampled 80 rows of each), rendered
 with the target's chat template and thinking disabled, or a local JSONL file with one
 {"prompt": "..."} per line. The acceptance length is the mean number of tokens committed
-per target forward pass, the draft's accepted tokens plus the target's own (the paper's
-gamma). With --baseline the target also decodes every prompt on its own, which gives the
-speedup and, at temperature 0, checks that the outputs are the target's greedy decoding.
+per target forward pass, the draft's accepted tokens plus the target's own (as in DFlash's
+evaluation). With --baseline the target also decodes every prompt on its own, which gives
+the speedup and, at temperature 0, checks that the outputs are the target's greedy
+decoding (exactly with --dtype float32; see the note it prints in bfloat16).
 """
 
 import argparse
@@ -19,7 +20,7 @@ import time
 import torch
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
-# Dataset, subset, split, and the user turn, formatted as in the paper's evaluation.
+# Dataset, subset, split, and the user turn, formatted as in DFlash's evaluation.
 DATASETS = {
     "gsm8k": (
         "openai/gsm8k", "main", "test",
@@ -64,11 +65,15 @@ def main():
     parser.add_argument("--num-steps", type=int, default=1)
     parser.add_argument("--baseline", action="store_true", help="also decode with the target alone")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--dtype", default="bfloat16", choices=["bfloat16", "float32"], help="dtype of the target and the drafter"
+    )
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.target)
-    target = AutoModelForCausalLM.from_pretrained(args.target, dtype=torch.bfloat16).to("cuda").eval()
-    draft = AutoModel.from_pretrained(args.draft, trust_remote_code=True, dtype=torch.bfloat16).to("cuda").eval()
+    dtype = getattr(torch, args.dtype)
+    target = AutoModelForCausalLM.from_pretrained(args.target, dtype=dtype).to("cuda").eval()
+    draft = AutoModel.from_pretrained(args.draft, trust_remote_code=True, dtype=dtype).to("cuda").eval()
     generator = torch.Generator(device="cuda").manual_seed(args.seed)
     prompts = load_prompts(args.dataset, args.num_prompts)
 
@@ -104,17 +109,11 @@ def main():
         new_tokens += output.num_new_tokens
         spec_seconds += seconds
         if args.baseline:
-            sample = args.temperature > 0
-            baseline, seconds = timed(
-                lambda: target.generate(
-                    input_ids,
-                    max_new_tokens=args.max_new_tokens,
-                    do_sample=sample,
-                    temperature=args.temperature if sample else 1.0,
-                    top_p=1.0,
-                    top_k=0,
-                )
-            )
+            if args.temperature > 0:  # sample from the target's full distribution, as spec_generate does
+                options = dict(do_sample=True, temperature=args.temperature, top_p=1.0, top_k=0)
+            else:
+                options = dict(do_sample=False, temperature=1.0)
+            baseline, seconds = timed(lambda: target.generate(input_ids, max_new_tokens=args.max_new_tokens, **options))
             base_tokens += baseline.shape[1] - input_ids.shape[1]
             base_seconds += seconds
             matches += torch.equal(baseline, output.sequences)
@@ -126,6 +125,12 @@ def main():
         print(f"target alone {base_speed:.1f} tok/s, speedup {new_tokens / spec_seconds / base_speed:.2f}x")
         if args.temperature == 0:
             print(f"identical to the target's greedy decoding: {matches}/{len(prompts)} prompts")
+            if matches < len(prompts) and args.dtype == "bfloat16":
+                print(
+                    "  In bfloat16 the target's batched verification pass and its token-by-token decoding round\n"
+                    "  differently, so the two can part where the target's top two logits tie to within bfloat16\n"
+                    "  precision. Run with --dtype float32 for an exact check."
+                )
 
 
 if __name__ == "__main__":
