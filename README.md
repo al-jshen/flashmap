@@ -135,25 +135,6 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-## Results
-
-Speedup over the target alone on Qwen3-8B, with the acceptance length (tokens per target forward pass) in
-parentheses. These runs used greedy decoding at concurrency 1 on one H100 PCIe GPU. DFlash is the public
-[z-lab/Qwen3-8B-DFlash-b16](https://huggingface.co/z-lab/Qwen3-8B-DFlash-b16) checkpoint, and FlashMap
-drafts with one jump.
-
-| Engine | Drafter | GSM8K | HumanEval | MT-Bench |
-|---|---|---|---|---|
-| SGLang 0.5.20 | DFlash | 4.68x (6.18) | **4.65x** (6.33) | 1.69x (2.23) |
-| | FlashMap | **6.26x** (7.72) | 4.61x (5.70) | **1.91x** (2.32) |
-| vLLM 0.31.0 | DFlash | 4.50x (5.86) | **4.92x** (6.48) | 2.77x (3.56) |
-| | FlashMap | **5.97x** (7.18) | 4.82x (5.85) | **3.04x** (3.59) |
-
-FlashMap is clearly faster on GSM8K and MT-Bench, and DFlash is slightly faster on HumanEval. At higher
-concurrency DFlash's lead on HumanEval grows. The integration guides have results at concurrency 4 and 16, at
-temperature 1, and for Qwen3-4B. In the paper's evaluation, with 9 benchmarks and a DFlash retrained on the
-same data as FlashMap, FlashMap with one jump is the fastest drafter on every benchmark
-([details](docs/details.md#results-from-the-paper)).
 
 ## Training
 
@@ -164,16 +145,7 @@ and the SpecForge fork ([FlashMap](https://github.com/al-jshen/SpecForge/blob/fl
 [`scripts/convert_checkpoint.py`](scripts/convert_checkpoint.py) turns a trained checkpoint into a release
 folder for this package ([details](docs/details.md#converting-checkpoints)).
 
-## Citation
 
-```bibtex
-@misc{flashmap2026,
-  title  = {{FlashMap}: Flow Map Speculative Decoding},
-  author = {Shen, Jeff and others},
-  year   = {2026},
-  note   = {Preprint, coming soon}
-}
-```
 
 ## License
 
