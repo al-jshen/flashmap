@@ -25,8 +25,6 @@ import os
 import sys
 
 SUPPORTED_SGLANG = "0.5.20"
-# The SpecForge fork's copy of this integration, which the plugin leaves alone.
-_SPECFORGE = "specforge.serving.sglang"
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +63,6 @@ def register() -> None:
         logger.warning("FlashMap drafts are not available: %s", error)
         return
     current = os.environ.get("SGLANG_EXTERNAL_MODEL_PACKAGE")
-    if current == _SPECFORGE:
-        # SpecForge's copy of this integration serves FlashMap (from its exports).
-        logger.info("FlashMap drafts are served by %s", _SPECFORGE)
-        return
     if not current:
         os.environ["SGLANG_EXTERNAL_MODEL_PACKAGE"] = __name__
     if (current and current != __name__) or "sglang.srt.models.registry" in sys.modules:

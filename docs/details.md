@@ -157,12 +157,9 @@ target's embedding and lm_head:
 python scripts/check_sglang.py --draft FlashMap-Qwen3-8B --target Qwen/Qwen3-8B
 ```
 
-The same integration lives in [our SpecForge fork](https://github.com/al-jshen/SpecForge/tree/flashmap)
-(`specforge.serving.sglang`), which trains FlashMap and is where the integration would be upstreamed to
-SGLang from; its
-[SGLang guide](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/basic_usage/flashmap_sglang.md)
-covers SpecForge's export path. With `SGLANG_EXTERNAL_MODEL_PACKAGE=specforge.serving.sglang`, the plugin
-leaves FlashMap to SpecForge.
+A map trained with [our SpecForge fork](https://github.com/al-jshen/SpecForge/tree/flashmap) is served the
+same way after `specforge export --to hf`, which writes it as a release folder
+([Serving FlashMap](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/basic_usage/flashmap_sglang.md)).
 
 ## Serving with vLLM
 
@@ -215,7 +212,8 @@ checkpoints to this release format, but does not serve them.
 FlashMap can be trained with speculators (vLLM) or SpecForge (SGLang); see [Training](../README.md#training).
 The speculators fork writes a release folder itself (`speculators convert <flow-map checkpoint> --algorithm
 flashmap --verifier <target> --output-path <folder>`, see its
-[Training FlashMap](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap_training.md#serving-the-result)).
+[Training FlashMap](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap_training.md#serving-the-result)),
+and so does SpecForge's `specforge export --to hf`.
 `scripts/convert_checkpoint.py` recognizes speculators checkpoints and SpecForge's `specforge export --to hf`
 folders, and writes a release folder for this package: the config (with the fields
 [SGLang](#serving-with-sglang) and [vLLM](#serving-with-vllm) serve it with), the weights without the target's

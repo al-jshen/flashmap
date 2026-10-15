@@ -75,9 +75,9 @@ The drafter uses its 64k-token draft vocabulary and its 16-token block by defaul
 `temperature > 0` needs no extra option. Set `FLASHMAP_NUM_STEPS=2` when launching to draft with two jumps.
 [Serving with SGLang](docs/details.md#serving-with-sglang) covers the options, including tree drafting.
 
-The same integration lives in [our SpecForge fork](https://github.com/al-jshen/SpecForge/tree/flashmap),
-which trains FlashMap and is where the integration would be upstreamed to SGLang from. Serving needs only
-`flashmap[sglang]`.
+[Our SpecForge fork](https://github.com/al-jshen/SpecForge/tree/flashmap) trains FlashMap with SGLang's
+training library, and its `specforge export --to hf` writes a trained map as a release folder that
+`flashmap[sglang]` serves as it is.
 
 ## Serve with vLLM
 
@@ -123,9 +123,9 @@ FlashMap is trained in two stages: a flow over one-hot token blocks, then a flow
 recipes are in the speculators fork
 ([Training FlashMap](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap_training.md))
 and the SpecForge fork ([FlashMap](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/concepts/FlashMap.md)).
-The speculators fork converts its checkpoints into a release folder for this package
-(`speculators convert --algorithm flashmap`), and [`scripts/convert_checkpoint.py`](scripts/convert_checkpoint.py)
-converts speculators and SpecForge checkpoints ([details](docs/details.md#converting-checkpoints)).
+Both write a trained map as a release folder for this package (`speculators convert --algorithm flashmap`,
+`specforge export --to hf`), and [`scripts/convert_checkpoint.py`](scripts/convert_checkpoint.py) converts
+speculators and SpecForge checkpoints too ([details](docs/details.md#converting-checkpoints)).
 
 ## License
 
