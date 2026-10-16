@@ -1,6 +1,6 @@
 # FlashMap: Flow Map Speculative Decoding
 
-**[Project page](https://jshen.net/flashmap)** · **Paper** (coming soon) · **[Models](#models)**
+**[Project page](https://jshen.net/flashmap)** · **Paper** (coming soon) · **[Models](https://huggingface.co/collections/j-shen/flashmap-6ad0feb955bdc30db59769fa)**
 
 FlashMap is a drafter for lossless speculative decoding. It proposes a whole block of K tokens in a single pass. Unlike discrete diffusion drafters, which predict each token of the block independently and ignore inter-token dependencies, FlashMap uses a flow map ([Flow Map Language Models](https://arxiv.org/abs/2602.16813)), which jumps from Gaussian noise to the whole block in a single step and can capture dependencies between its tokens. On Qwen3-8B, FlashMap decodes up to 6x faster than the target alone.
 
@@ -19,7 +19,7 @@ the [SGLang](#serve-with-sglang) or [vLLM](#serve-with-vllm) integration.
 ```bash
 uv venv --python 3.12
 source .venv/bin/activate
-uv pip install git+https://github.com/al-jshen/flashmap
+uv pip install flashmap
 ```
 
 The package needs only `torch` and `transformers>=4.56`; serving takes the `sglang` or `vllm` extra (below). It
@@ -56,7 +56,7 @@ The SGLang integration is a plugin in this package (the `sglang` extra), which S
 ```bash
 uv venv --python 3.12 .venv-sglang
 source .venv-sglang/bin/activate
-uv pip install "sglang==0.5.20" "flashmap[sglang] @ git+https://github.com/al-jshen/flashmap"
+uv pip install "sglang==0.5.20" "flashmap[sglang]"
 
 python -m sglang.launch_server --model-path Qwen/Qwen3-8B \
   --speculative-algorithm DSPARK --speculative-draft-model-path j-shen/FlashMap-Qwen3-8B
@@ -73,7 +73,7 @@ The vLLM integration is a plugin in this package (the `vllm` extra), which vLLM 
 ```bash
 uv venv --python 3.12 .venv-vllm
 source .venv-vllm/bin/activate
-uv pip install "vllm==0.31.*" "flashmap[vllm] @ git+https://github.com/al-jshen/flashmap"
+uv pip install "vllm==0.31.*" "flashmap[vllm]"
 
 vllm serve Qwen/Qwen3-8B --speculative-config '{"model": "j-shen/FlashMap-Qwen3-8B", "num_speculative_tokens": 16}'
 ```
@@ -107,12 +107,12 @@ recipes are in the speculators fork
 ([Training FlashMap](https://github.com/al-jshen/speculators/blob/flashmap/docs/user_guide/algorithms/flashmap_training.md))
 and the SpecForge fork ([FlashMap](https://github.com/al-jshen/SpecForge/blob/flashmap/docs/sections/concepts/FlashMap.md)).
 Both write a trained map as a release folder for this package (`speculators convert --algorithm flashmap`,
-`specforge export --to hf`), and [`scripts/convert_checkpoint.py`](scripts/convert_checkpoint.py) converts
+`specforge export --to hf`), and [`scripts/convert_checkpoint.py`](https://github.com/al-jshen/flashmap/blob/master/scripts/convert_checkpoint.py) converts
 speculators and SpecForge checkpoints too (`python scripts/convert_checkpoint.py --help`).
 
 ## License
 
-The code is released under the [MIT license](LICENSE). The model weights are released under Apache-2.0,
+The code is released under the [MIT license](https://github.com/al-jshen/flashmap/blob/master/LICENSE). The model weights are released under Apache-2.0,
 following Qwen3.
 
 FlashMap builds on [DFlash](https://github.com/z-lab/dflash),
