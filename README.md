@@ -58,7 +58,7 @@ uv venv --python 3.12 .venv-sglang
 source .venv-sglang/bin/activate
 uv pip install "sglang==0.5.20" "flashmap[sglang]"
 
-python -m sglang.launch_server --model-path Qwen/Qwen3-8B \
+sglang serve --model-path Qwen/Qwen3-8B \
   --speculative-algorithm DSPARK --speculative-draft-model-path j-shen/FlashMap-Qwen3-8B
 ```
 
@@ -108,7 +108,7 @@ sampler instead: `VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve ...`.
 
 **Problem:** SGLang fails at startup with `NVCC version must be at least 12.9`.\
 **Solution:** SGLang starts DeepGEMM's compiler, which needs CUDA 12.9 or newer. Install it, or turn DeepGEMM off
-(it only runs FP8 matmuls): `SGLANG_DEEPGEMM_PDL=0 SGLANG_ENABLE_JIT_DEEPGEMM=0 python -m sglang.launch_server ...`.
+(it only runs FP8 matmuls): `SGLANG_DEEPGEMM_PDL=0 SGLANG_ENABLE_JIT_DEEPGEMM=0 sglang serve ...`.
 
 ## Training
 

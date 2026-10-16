@@ -3,7 +3,7 @@
 sglang's DSPARK speculative worker drafts with :class:`.model.FlashMapDraftModel`,
 which serves a FlashMap release folder as it is:
 
-    python -m sglang.launch_server --model-path Qwen/Qwen3-8B \\
+    sglang serve --model-path Qwen/Qwen3-8B \\
         --speculative-algorithm DSPARK \\
         --speculative-draft-model-path j-shen/FlashMap-Qwen3-8B
 

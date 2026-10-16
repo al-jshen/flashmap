@@ -4,7 +4,7 @@
 A FlashMap release folder is served as it is (with ``flashmap[sglang]``
 installed, its sglang plugin registers this model):
 
-    python -m sglang.launch_server --model-path Qwen/Qwen3-8B \\
+    sglang serve --model-path Qwen/Qwen3-8B \\
         --speculative-algorithm DSPARK \\
         --speculative-draft-model-path j-shen/FlashMap-Qwen3-8B
 
