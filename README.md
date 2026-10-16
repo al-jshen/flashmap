@@ -100,6 +100,16 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
+## Troubleshooting
+
+**Problem:** `vllm serve` fails at startup with `/usr/local/cuda/bin/nvcc: No such file or directory`.\
+**Solution:** vLLM compiles FlashInfer's sampling kernel with `nvcc`. Install the CUDA toolkit, or use PyTorch's
+sampler instead: `VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve ...`.
+
+**Problem:** SGLang fails at startup with `NVCC version must be at least 12.9`.\
+**Solution:** SGLang starts DeepGEMM's compiler, which needs CUDA 12.9 or newer. Install it, or turn DeepGEMM off
+(it only runs FP8 matmuls): `SGLANG_DEEPGEMM_PDL=0 SGLANG_ENABLE_JIT_DEEPGEMM=0 python -m sglang.launch_server ...`.
+
 ## Training
 
 FlashMap is trained in two stages: a flow over one-hot token blocks, then a flow map distilled from it. The
