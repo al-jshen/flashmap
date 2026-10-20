@@ -44,6 +44,7 @@ flashmap = "flashmap.vllm:register"
 Homepage = "https://jshen.net/flashmap"
 Repository = "https://github.com/al-jshen/flashmap"
 Documentation = "https://github.com/al-jshen/flashmap#readme"
+Paper = "https://arxiv.org/abs/2610.24365"
 "Model (Qwen3-8B)" = "https://huggingface.co/j-shen/FlashMap-Qwen3-8B"
 "Model (Qwen3-4B)" = "https://huggingface.co/j-shen/FlashMap-Qwen3-4B"
 

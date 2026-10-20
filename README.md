@@ -1,6 +1,6 @@
 # FlashMap: Flow Map Speculative Decoding
 
-**[Project page](https://jshen.net/flashmap)** · **Paper** (coming soon) · **[Models](https://huggingface.co/collections/j-shen/flashmap-6ad0feb955bdc30db59769fa)**
+**[Project page](https://jshen.net/flashmap)** · **[Paper](https://arxiv.org/abs/2610.24365)** · **[Models](https://huggingface.co/collections/j-shen/flashmap-6ad0feb955bdc30db59769fa)**
 
 FlashMap is a drafter for lossless speculative decoding. It proposes a whole block of K tokens in a single pass. Unlike discrete diffusion drafters, which predict each token of the block independently and ignore inter-token dependencies, FlashMap uses a flow map ([Flow Map Language Models](https://arxiv.org/abs/2602.16813)), which jumps from Gaussian noise to the whole block in a single step and can capture dependencies between its tokens. On Qwen3-8B, FlashMap decodes up to 6x faster than the target alone.
 
@@ -129,3 +129,17 @@ FlashMap builds on [DFlash](https://github.com/z-lab/dflash),
 [Flow Map Language Models](https://arxiv.org/abs/2602.16813), [DeepSpec](https://github.com/deepseek-ai/DeepSpec),
 [SGLang](https://github.com/sgl-project/sglang), [vLLM](https://github.com/vllm-project/vllm),
 [speculators](https://github.com/vllm-project/speculators) and [SpecForge](https://github.com/sgl-project/SpecForge).
+
+## Citation
+
+```bibtex
+@misc{flashmap2026,
+  title         = {{FlashMap}: Flow Map Speculative Decoding},
+  author        = {Shen, Jeff and Zhou, Zhejian and Lee, Ryan and May, Jonathan and Ho, Shirley},
+  year          = {2026},
+  eprint        = {2610.24365},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CL},
+  url           = {https://arxiv.org/abs/2610.24365}
+}
+```
