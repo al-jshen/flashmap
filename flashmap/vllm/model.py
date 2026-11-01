@@ -25,8 +25,8 @@ drawn in the embedding's eigenbasis (fold.py). Everything that depends only on
 the jump times (every AdaLN modulation) is computed once at load. More jumps
 run the reference algorithm exactly, with a vocabulary-sized state.
 
-Requirements: the V2 model runner, tensor parallel size 1, the FlashAttention
-backend and a bf16 KV cache (checked at load).
+Requirements: the V2 model runner, tensor parallel size 1, a bf16 KV cache and
+the FlashAttention backend, TRITON_ATTN on ROCm (all checked at load).
 
 The draft noise is keyed by each request's seed and the slot's position, so a
 seeded request drafts the same blocks on every run. ``FLASHMAP_NUM_STEPS``
@@ -46,7 +46,15 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+
+if current_platform.is_rocm():
+    from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+
+    flash_attn_varlen_func = None
+else:
+    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+
+    unified_attention = None
 
 from flashmap.vllm.fold import (
     fold_head,
@@ -98,6 +106,27 @@ def paged_cross_attention(
         key_cache = key_cache.view(query.dtype)
         value_cache = value_cache.view(query.dtype)
         q_descale, k_descale, v_descale = descales.unbind(0)
+    if unified_attention is not None:
+        out = torch.empty(query.shape, dtype=torch.bfloat16, device=query.device)
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=out,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=seqused_k,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=softmax_scale,
+            causal=False,
+            window_size=(-1, -1),
+            block_table=block_table,
+            softcap=0.0,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+        )
+        return out
     return flash_attn_varlen_func(
         q=query,
         k=key_cache,
@@ -488,17 +517,37 @@ class FlashMapDraftModel(nn.Module):
             for name, weight in weights.items()
         }
 
+    @staticmethod
+    def _attention_version(attn: Attention) -> int:
+        """The backend's FlashAttention major version, 0 for ROCm's Triton one."""
+        if current_platform.is_rocm():
+            # TRITON_ATTN pages K/V exactly as FlashAttention does, which is what
+            # the cache writes and the cross-attention read assume.
+            if type(attn.impl).__name__ != "TritonAttentionImpl":
+                raise ValueError(
+                    "FlashMap drafting on ROCm needs the TRITON_ATTN backend, got "
+                    f'{type(attn.impl).__name__}; pass "attention_backend": '
+                    '"TRITON_ATTN" in --speculative-config'
+                )
+            return 0
+        version = getattr(attn.impl, "vllm_flash_attn_version", None)
+        if version is None:
+            raise ValueError(
+                "FlashMap drafting needs the FlashAttention backend, got "
+                f"{type(attn.impl).__name__}"
+            )
+        return version
+
     def _check_attention(self) -> None:
         for layer in self.layers:
             attn = layer.cross_attn.attn
-            version = getattr(attn.impl, "vllm_flash_attn_version", None)
-            if version is None:
-                raise ValueError(
-                    "FlashMap drafting needs the FlashAttention backend, got "
-                    f"{type(attn.impl).__name__}"
-                )
+            version = self._attention_version(attn)
             kv_dtype = str(getattr(attn, "kv_cache_dtype", "auto"))
             if kv_dtype in ("fp8", "fp8_e4m3"):
+                if current_platform.is_rocm():
+                    raise ValueError(
+                        "An fp8 FlashMap draft KV cache is not supported on ROCm yet."
+                    )
                 if version < 3:  # noqa: PLR2004
                     raise ValueError(
                         "An fp8 FlashMap draft KV cache needs FlashAttention 3 "

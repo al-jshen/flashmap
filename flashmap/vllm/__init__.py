@@ -132,7 +132,7 @@ def update_flashmap(config_dict: dict, pre_trained_config: dict) -> None:
 
 
 def _init_speculator(init_speculator):
-    def init_flashmap_or_other(vllm_config, device):
+    def init_flashmap_or_other(vllm_config, device, *args, **kwargs):
         spec = vllm_config.speculative_config
         if (
             spec is not None
@@ -144,7 +144,7 @@ def _init_speculator(init_speculator):
             )
 
             return FlashMapSpeculator(vllm_config, device)
-        return init_speculator(vllm_config, device)
+        return init_speculator(vllm_config, device, *args, **kwargs)
 
     init_flashmap_or_other.flashmap = True  # type: ignore[attr-defined]
     return init_flashmap_or_other
@@ -177,6 +177,13 @@ def _post_init(post_init):
                 self.method = "dflash"
                 if self.num_speculative_tokens is None:
                     self.num_speculative_tokens = int(config_dict["block_size"])
+                if self.attention_backend is None:
+                    from vllm.platforms import current_platform  # noqa: PLC0415
+
+                    # ROCm's other backends page the draft K/V in a layout the
+                    # DiT's cache writes and cross-attention read do not share.
+                    if current_platform.is_rocm():
+                        self.attention_backend = "TRITON_ATTN"
         post_init(self)
 
     post_init_flashmap.flashmap = True  # type: ignore[attr-defined]
