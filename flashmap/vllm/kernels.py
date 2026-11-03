@@ -239,7 +239,7 @@ def _write_context_kv_kernel(
     slot_ptr,  # (tokens,) int64; negative = skip
     k_norm_ptr,  # (L, D)
     cos_sin_ptr,  # (max_positions, D / 2, 2) float32
-    cache_ptrs,  # (L,) int64 data pointers of each layer's KV cache
+    cache_ptrs,  # (C,) int64 data pointers of the KV caches
     scales_ptr,  # (L, 2) float32 key and value scales of an fp8 cache
     eps,
     block_size,
@@ -251,27 +251,33 @@ def _write_context_kv_kernel(
     FP8: tl.constexpr,
     H: tl.constexpr,
     D: tl.constexpr,
-    H_POW2: tl.constexpr,
+    HPC: tl.constexpr,
+    HPC_POW2: tl.constexpr,
 ):
-    # One program per (token, layer); all heads at once, the head axis padded
-    # to a power of two (a 2560-wide DiT has 20 heads) and masked.
+    # One program per (token, cache): the cache's HPC heads at once, the head axis
+    # padded to a power of two and masked. Cache c holds the DiT heads c * HPC ..
+    # of the layer-major order, head g being head g % H of layer g // H; with one
+    # cache per layer (HPC = H) that is the layer's own heads.
     token = tl.program_id(0).to(tl.int64)
-    layer = tl.program_id(1)
+    cache_id = tl.program_id(1)
     slot = tl.load(slot_ptr + token).to(tl.int64)
     if slot < 0:
         return
     HALF: tl.constexpr = D // 2
-    h = tl.arange(0, H_POW2)[:, None]
-    head = h < H
+    s = tl.arange(0, HPC_POW2)[:, None]
+    g = cache_id * HPC + s
+    head = (s < HPC) & (g < L * H)
+    layer = g // H
+    h = g % H
     i = tl.arange(0, HALF)[None, :]
     d = tl.arange(0, D)[None, :]
-    k_row = kv_ptr + (token * L + layer) * (2 * H * D) + h * D
+    k_row = kv_ptr + ((token * L + layer) * 2 * H + h) * D
     v_row = k_row + H * D
     even = tl.load(k_row + 2 * i, mask=head, other=0.0).to(tl.float32)
     odd = tl.load(k_row + 2 * i + 1, mask=head, other=0.0).to(tl.float32)
     rms = tl.rsqrt((tl.sum(even * even, 1) + tl.sum(odd * odd, 1)) / D + eps)[:, None]
-    w_even = tl.load(k_norm_ptr + layer * D + 2 * i).to(tl.float32)
-    w_odd = tl.load(k_norm_ptr + layer * D + 2 * i + 1).to(tl.float32)
+    w_even = tl.load(k_norm_ptr + layer * D + 2 * i, mask=head, other=0.0).to(tl.float32)
+    w_odd = tl.load(k_norm_ptr + layer * D + 2 * i + 1, mask=head, other=0.0).to(tl.float32)
     even = (even * (w_even * rms).to(tl.bfloat16).to(tl.float32)).to(tl.bfloat16)
     odd = (odd * (w_odd * rms).to(tl.bfloat16).to(tl.float32)).to(tl.bfloat16)
     even = even.to(tl.float32)
@@ -285,17 +291,17 @@ def _write_context_kv_kernel(
     values = tl.load(v_row + d, mask=head, other=0.0)
     if FP8:
         # e4m3 with per-tensor scales, as vLLM's fp8 KV caches store them.
-        k_scale = tl.load(scales_ptr + layer * 2)
-        v_scale = tl.load(scales_ptr + layer * 2 + 1)
-        cache = tl.load(cache_ptrs + layer).to(tl.pointer_type(tl.float8e4nv))
+        k_scale = tl.load(scales_ptr + layer * 2, mask=head, other=1.0)
+        v_scale = tl.load(scales_ptr + layer * 2 + 1, mask=head, other=1.0)
+        cache = tl.load(cache_ptrs + cache_id).to(tl.pointer_type(tl.float8e4nv))
         key_out = (key_out / k_scale).to(tl.float8e4nv)
         key_odd_out = (key_odd_out / k_scale).to(tl.float8e4nv)
         values = (values.to(tl.float32) / v_scale).to(tl.float8e4nv)
     else:
-        cache = tl.load(cache_ptrs + layer).to(tl.pointer_type(tl.bfloat16))
+        cache = tl.load(cache_ptrs + cache_id).to(tl.pointer_type(tl.bfloat16))
         key_out = key_out.to(tl.bfloat16)
         key_odd_out = key_odd_out.to(tl.bfloat16)
-    dst = cache + (slot // block_size) * stride_block + h * stride_head
+    dst = cache + (slot // block_size) * stride_block + s * stride_head
     dst += (slot % block_size) * stride_token
     tl.store(dst + 2 * i, key_out, mask=head)
     tl.store(dst + 2 * i + 1, key_odd_out, mask=head)
@@ -313,21 +319,29 @@ def write_context_kv(
     block_size: int,
     eps: float,
     scales: torch.Tensor | None = None,
+    heads_per_cache: int | None = None,
 ) -> None:
     """Write every layer's context keys (k-normed and rotated) and values for
     ``kv (tokens, layers, 2, heads, head_dim)`` into the paged KV caches at
     ``slots`` (negative slots are skipped), in one launch.
 
-    ``cache_strides`` are ``(block, head, token, value offset)`` in elements of
-    the vLLM FlashAttention cache ``(blocks, heads, block_size, 2 * head_dim)``.
-    With ``scales (layers, 2)`` (each layer's key and value scale) the caches are
-    e4m3 and store ``key / k_scale`` and ``value / v_scale``.
+    The heads go to the caches of ``cache_ptrs`` in layer-major order,
+    ``heads_per_cache`` to a cache (default: ``heads``, one cache per layer; see
+    context_cache.py). ``cache_strides`` are ``(block, head, token, value offset)``
+    in elements of the vLLM FlashAttention cache ``(blocks, heads, block_size, 2 *
+    head_dim)``, the same for every cache. With ``scales (layers, 2)`` (each layer's
+    key and value scale) the caches are e4m3 and store ``key / k_scale`` and
+    ``value / v_scale``.
     """
     tokens, layers, _, heads, head_dim = kv.shape
     if not tokens:
         return
+    heads_per_cache = heads_per_cache or heads
+    num_caches = cache_ptrs.numel()
+    if num_caches * heads_per_cache < layers * heads:
+        raise ValueError(f"{num_caches} caches of {heads_per_cache} heads cannot hold {layers} x {heads} heads")
     stride_block, stride_head, stride_token, v_offset = cache_strides
-    _write_context_kv_kernel[(tokens, layers)](
+    _write_context_kv_kernel[(tokens, num_caches)](
         kv.contiguous(),
         positions.contiguous(),
         slots.contiguous(),
@@ -345,7 +359,8 @@ def write_context_kv(
         FP8=scales is not None,
         H=heads,
         D=head_dim,
-        H_POW2=triton.next_power_of_2(heads),
+        HPC=heads_per_cache,
+        HPC_POW2=triton.next_power_of_2(heads_per_cache),
     )
 
 

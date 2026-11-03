@@ -33,6 +33,10 @@ all use their rows of the target's embedding and LM head.
 Requirements: the V2 model runner, tensor parallel size 1, the FlashAttention
 backend and a bf16 KV cache (checked at load).
 
+On a hybrid target the context is packed into caches with the target attention's
+page instead of one per DiT layer (context_cache.py), so that vLLM does not pad
+every page to the DiT's; ``FLASHMAP_CONTEXT_CACHE=layers`` keeps one per layer.
+
 The draft noise is keyed by each request's seed and the slot's position, so a
 seeded request drafts the same blocks on every run. ``FLASHMAP_NUM_STEPS``
 overrides the checkpoint's number of jumps.
@@ -54,6 +58,11 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
 from flashmap.configuration_flashmap import jump_times
+from flashmap.vllm.context_cache import (
+    ContextCachePlan,
+    attend_by_segments,
+    plan_context_cache,
+)
 from flashmap.vllm.fold import (
     fold_head,
     fold_noise,
@@ -197,7 +206,7 @@ class FlashMapMLP(nn.Module):
 
 
 class FlashMapLayer(nn.Module):
-    def __init__(self, config, layer_prefix: str, vllm_config: VllmConfig):
+    def __init__(self, config, layer_prefix: str, vllm_config: VllmConfig, own_cache: bool = True):
         super().__init__()
         dim, cond_dim = config.hidden_size, config.timestep_embed_dim
         heads = config.num_attention_heads
@@ -211,14 +220,33 @@ class FlashMapLayer(nn.Module):
             dim, config.intermediate_size, getattr(config, "mlp_type", None) or "gelu"
         )
         # The cross-attention context lives in vLLM's paged KV cache; this layer
-        # only owns the cache (the draft step reads it with its own kernels).
-        self.cross_attn.attn = Attention(
+        # only owns the cache (the draft step reads it with its own kernels), unless
+        # the model packs every layer's context into caches of its own
+        # (context_cache.py).
+        if own_cache:
+            self.cross_attn.attn = Attention(
+                heads,
+                head_dim,
+                head_dim**-0.5,
+                num_kv_heads=heads,
+                cache_config=vllm_config.cache_config,
+                prefix=f"{layer_prefix}.cross_attn.attn",
+            )
+
+
+class ContextCache(nn.Module):
+    """One attention layer of vLLM's paged KV cache holding part of every DiT
+    layer's cross-attention context, in the virtual layout (context_cache.py)."""
+
+    def __init__(self, heads: int, head_dim: int, vllm_config: VllmConfig, prefix: str):
+        super().__init__()
+        self.attn = Attention(
             heads,
             head_dim,
             head_dim**-0.5,
             num_kv_heads=heads,
             cache_config=vllm_config.cache_config,
-            prefix=f"{layer_prefix}.cross_attn.attn",
+            prefix=f"{prefix}.attn",
         )
 
 
@@ -226,7 +254,9 @@ class FlashMapModel(nn.Module):
     """The FlashMap weights under their canonical names. ``embed_tokens`` is the
     target's, attached at load (``load_dflash_model``)."""
 
-    def __init__(self, config, vllm_config: VllmConfig, prefix: str, start: int):
+    def __init__(
+        self, config, vllm_config: VllmConfig, prefix: str, start: int, plan: ContextCachePlan
+    ):
         super().__init__()
         dim, target_hidden = config.hidden_size, config.target_hidden_size
         eps = config.rms_norm_eps
@@ -244,12 +274,54 @@ class FlashMapModel(nn.Module):
         self.jump_embed = TimestepEmbedding(config.timestep_embed_dim, frequency_dim)
         self.layers = nn.ModuleList(
             [
-                FlashMapLayer(config, f"{prefix}.layers.{start + i}", vllm_config)
+                FlashMapLayer(
+                    config, f"{prefix}.layers.{start + i}", vllm_config, not plan.virtual
+                )
                 for i in range(config.num_hidden_layers)
             ]
         )
+        if plan.virtual:
+            head_dim = dim // config.num_attention_heads
+            self.context_cache = nn.ModuleList(
+                [
+                    ContextCache(
+                        plan.heads_per_cache,
+                        getattr(config, "head_dim", None) or head_dim,
+                        vllm_config,
+                        f"{prefix}.context_cache.{start + i}",
+                    )
+                    for i in range(plan.num_caches)
+                ]
+            )
         self.final_adaln = AdaLN(config.timestep_embed_dim, dim)
         self.head = nn.Linear(dim, target_hidden)
+
+
+def context_cache_plan(config, vllm_config: VllmConfig) -> ContextCachePlan:
+    """The context layout for this drafter next to vLLM's target (context_cache.py)."""
+    model_config, parallel_config = vllm_config.model_config, vllm_config.parallel_config
+    heads = int(config.num_attention_heads)
+    head_dim = int(getattr(config, "head_dim", None) or config.hidden_size // heads)
+    try:
+        hybrid = bool(model_config.is_hybrid)
+        attention_layers = int(
+            model_config.get_num_layers_by_block_type(parallel_config, "attention")
+        )
+        kv_heads = int(model_config.get_num_kv_heads(parallel_config))
+        head_size = int(model_config.get_head_size())
+    except Exception as error:  # noqa: BLE001 - an unknown target keeps the default
+        logger.warning("FlashMap: per-layer context cache (%s)", error)
+        hybrid, attention_layers, kv_heads, head_size = False, 0, 0, 0
+    return plan_context_cache(
+        int(config.num_hidden_layers),
+        heads,
+        head_dim,
+        hybrid=hybrid,
+        target_attention_layers=attention_layers,
+        target_kv_heads=kv_heads,
+        target_head_size=head_size,
+        bf16_cache=str(vllm_config.cache_config.cache_dtype) in ("auto", "bfloat16"),
+    )
 
 
 class FlashMapDraftModel(nn.Module):
@@ -285,8 +357,13 @@ class FlashMapDraftModel(nn.Module):
         # state moves to.
         self.jumps = jump_times(self.time_grid)
         start = vllm_config.model_config.get_total_num_hidden_layers()
+        self.cache_plan = context_cache_plan(config, vllm_config)
         self.model = FlashMapModel(
-            config, vllm_config, f"{prefix}.model" if prefix else "model", start
+            config,
+            vllm_config,
+            f"{prefix}.model" if prefix else "model",
+            start,
+            self.cache_plan,
         )
         # Draft vocabulary: a restricted head drafts over d2t's tokens only. A
         # drafter trained on one (state_vocab_size) also lives on it: its state
@@ -316,6 +393,14 @@ class FlashMapDraftModel(nn.Module):
     @property
     def layers(self) -> nn.ModuleList:
         return self.model.layers
+
+    @property
+    def cache_layers(self) -> list:
+        """vLLM's attention layers holding the context: one per DiT layer, or the
+        virtual layout's (context_cache.py)."""
+        if self.cache_plan.virtual:
+            return [cache.attn for cache in self.model.context_cache]
+        return [layer.cross_attn.attn for layer in self.layers]
 
     # ------------------------------------------------------------------ loading
 
@@ -381,6 +466,15 @@ class FlashMapDraftModel(nn.Module):
         self.dim = self.num_heads * self.head_dim
         self.softmax_scale = self.head_dim**-0.5
         self._check_attention()
+        plan = self.cache_plan
+        self.segments = plan.segments
+        self.segment_heads = sorted({run[2] for runs in self.segments for run in runs})
+        logger.info(
+            "FlashMap context cache: %s",
+            f"virtual, {plan.reason}"
+            if plan.virtual
+            else f"one cache per DiT layer ({plan.reason or 'default'})",
+        )
 
         # AdaLN modulations for each jump's evaluation (s, t).
         self.modulations, self.final_modulations = [], []
@@ -541,8 +635,7 @@ class FlashMapDraftModel(nn.Module):
         }
 
     def _check_attention(self) -> None:
-        for layer in self.layers:
-            attn = layer.cross_attn.attn
+        for attn in self.cache_layers:
             version = getattr(attn.impl, "vllm_flash_attn_version", None)
             if version is None:
                 raise ValueError(
@@ -564,6 +657,7 @@ class FlashMapDraftModel(nn.Module):
                 )
         self.fa_version = version
         if self.kv_fp8:
+            assert not self.cache_plan.virtual, "the virtual layout needs a bf16 cache"
             # Per-tensor scales of vLLM's fp8 KV caches (1 unless calibrated).
             self.kv_scales = torch.stack(
                 [
@@ -613,7 +707,7 @@ class FlashMapDraftModel(nn.Module):
     def cache_layout(self):
         """Data pointers and strides of every layer's KV cache, or None before
         the caches are allocated."""
-        caches = [layer.cross_attn.attn.kv_cache for layer in self.layers]
+        caches = [attn.kv_cache for attn in self.cache_layers]
         if not all(isinstance(c, torch.Tensor) and c.numel() for c in caches):
             return None
         ptrs = [c.data_ptr() for c in caches]
@@ -654,6 +748,7 @@ class FlashMapDraftModel(nn.Module):
             block_size,
             self.layers[0].cross_attn.k_norm.eps,
             self.kv_scales,
+            self.cache_plan.heads_per_cache,
         )
 
     def precompute_and_store_context_kv(
@@ -776,18 +871,25 @@ class FlashMapDraftModel(nn.Module):
                             self.kv_scales[layer_id, 1],
                         ]
                     )[:, None, None].expand(3, seqused_k.shape[0], heads)
-                context = paged_cross_attention(
-                    query,
-                    kv_caches[layer_id],
-                    cu_seqlens_q,
-                    seqused_k,
-                    block_table,
-                    schedule,
-                    descales,
-                    queries,
-                    self.max_model_len,
-                    self.softmax_scale,
-                    self.fa_version,
+                # One call per run of the layer's heads in one cache (a single call
+                # over the layer's own cache in the per-layer layout).
+                def attend(part_query, part_cache, count, descales=descales, schedule=schedule):
+                    return paged_cross_attention(
+                        part_query,
+                        part_cache,
+                        cu_seqlens_q,
+                        seqused_k,
+                        block_table,
+                        None if schedule is None else schedule[count],
+                        None if descales is None else descales[..., :count],
+                        queries,
+                        self.max_model_len,
+                        self.softmax_scale,
+                        self.fa_version,
+                    )
+
+                context = attend_by_segments(
+                    query, kv_caches, self.segments[layer_id], attend
                 )
             hidden = hidden + mods[5] * self._lin(
                 context.view(tokens, dim),
@@ -863,24 +965,28 @@ class FlashMapDraftModel(nn.Module):
         return seeded_normal(seeds, rows[:tokens], positions, n_cols, self.noise_scale)
 
     def _cross_attention_schedule(self, metadata, seqused_k):
-        """FlashAttention 3's tile schedule for the step's cross-attention,
-        shared by every layer (it depends only on shapes and lengths)."""
+        """FlashAttention 3's tile schedules for the step's cross-attention, by the
+        number of heads a call attends with (every head segment of the context
+        layout), shared by every layer (they depend only on shapes and lengths)."""
         if self.fa_version != 3 or get_scheduler_metadata is None:  # noqa: PLR2004
             return None
-        caches = self.layers[0].cross_attn.attn.kv_cache
-        return get_scheduler_metadata(
-            batch_size=seqused_k.shape[0],
-            max_seqlen_q=self.block_size,
-            max_seqlen_k=self.max_model_len,
-            num_heads_q=self.num_heads,
-            num_heads_kv=self.num_heads,
-            headdim=self.head_dim,
-            cache_seqlens=seqused_k,
-            qkv_dtype=current_platform.fp8_dtype() if self.kv_fp8 else self.dtype,
-            cu_seqlens_q=metadata.query_start_loc,
-            page_size=caches.shape[2],
-            causal=False,
-        )
+        caches = self.cache_layers[0].kv_cache
+        return {
+            heads: get_scheduler_metadata(
+                batch_size=seqused_k.shape[0],
+                max_seqlen_q=self.block_size,
+                max_seqlen_k=self.max_model_len,
+                num_heads_q=heads,
+                num_heads_kv=heads,
+                headdim=self.head_dim,
+                cache_seqlens=seqused_k,
+                qkv_dtype=current_platform.fp8_dtype() if self.kv_fp8 else self.dtype,
+                cu_seqlens_q=metadata.query_start_loc,
+                page_size=caches.shape[2],
+                causal=False,
+            )
+            for heads in self.segment_heads
+        }
 
     def forward(
         self,
@@ -889,12 +995,12 @@ class FlashMapDraftModel(nn.Module):
         inputs_embeds: torch.Tensor | None = None,  # noqa: ARG002
     ) -> torch.Tensor:
         tokens = input_ids.shape[0]
-        kv_caches = [layer.cross_attn.attn.kv_cache for layer in self.layers]
+        kv_caches = [attn.kv_cache for attn in self.cache_layers]
         metadata = get_forward_context().attn_metadata
         pending, self._pending_context = self._pending_context, None
         attention = None
         if metadata is not None:
-            metadata = metadata[self.layers[0].cross_attn.attn.layer_name]
+            metadata = metadata[self.cache_layers[0].layer_name]
             kv, write_positions, write_slots, seqused_k = self._prologue_fn(
                 input_ids,
                 positions,
