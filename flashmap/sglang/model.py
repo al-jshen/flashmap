@@ -43,7 +43,9 @@ DSPARK drives a block draft through a small protocol, implemented here:
   target's LM head (hidden -> vocab) as one smaller matmul, restricted to the
   draft vocabulary (the target's most frequent tokens, the config's
   ``draft_vocab_size`` of the ranking in ``draft_vocab.safetensors``); drafted
-  indices map back to token ids in the draft graph.
+  indices map back to token ids in the draft graph. A drafter trained on a
+  draft vocabulary (``state_vocab_size``) drafts over its own ``draft_ids`` and
+  reads its state through their rows of the embedding as well.
 
 The draft borrows the target's token embedding and LM head (DSPARK attaches
 them); its Markov head is an identity (:mod:`.sampler`), so DSPARK
@@ -94,6 +96,7 @@ from sglang.srt.runtime_context import get_exec, get_model  # noqa: E402
 from sglang.srt.speculative.dspark_components import dspark_worker_v2  # noqa: E402
 from torch import nn  # noqa: E402
 
+from ..configuration_flashmap import FIXED_SETTINGS, jump_times  # noqa: E402
 from ..modeling_flashmap import FlashMapDraftModel as FlashMapDiT  # noqa: E402
 from .jump_bank import JumpNoiseBank, top_predictions  # noqa: E402
 from .kernels import (  # noqa: E402
@@ -240,6 +243,9 @@ class FlashMapDraftModel(FlashMapDiT):
                 "this checkpoint is a stage-1 flow (flow_map: false), which drafts "
                 "only by integrating over many steps; serve the flow map instead"
             )
+        for name, value in FIXED_SETTINGS.items():
+            if getattr(config, name, value) != value:
+                raise ValueError(f"this version of flashmap serves only {name}={value!r}")
         super().__init__(config)
         fm = self.config
         self.block_size = int(fm.block_size)
@@ -262,16 +268,26 @@ class FlashMapDraftModel(FlashMapDiT):
         self.lm_head = None  # the folded head, once the target's is attached
         self.embedding = None  # the target's token embedding (not a submodule)
         self.hot_ids = None  # draft vocabulary -> token ids (None: all tokens)
+        # The rows of the embedding the state is read through, and the map from
+        # the head's indices to them (None: the same indices).
+        self.state_embedding = None
+        self.head_to_state = None
         self.folded_head = None
 
         self.num_steps = int(os.environ.get("FLASHMAP_NUM_STEPS") or fm.num_steps)
         self.grid = [float(t) for t in fm.jump_grids[str(self.num_steps)]]
         assert self.grid[0] == 0.0 and self.grid[-1] == 1.0, self.grid
+        # Per jump (s, t, next): the map's evaluation delta_{s,t} and the time the
+        # state moves to.
+        self.jumps = jump_times(self.grid)
         self.jump_bank_size = int(os.environ.get("FLASHMAP_JUMP_BANK", "8192"))
         self.jump_topk = int(os.environ.get("FLASHMAP_JUMP_TOPK", "16"))
         self.jump_bank = None
         size = os.environ.get("FLASHMAP_DRAFT_VOCAB")
         size = int(size if size is not None else getattr(config, "draft_vocab_size", 0))
+        # A drafter trained on a draft vocabulary drafts over that one.
+        self.state_vocab_size = getattr(fm, "state_vocab_size", None)
+        size = self.state_vocab_size or size
         self.draft_vocab_size = size if 0 < size < self.vocab_size else 0
         self._vocab_ranking = None  # draft_vocab.safetensors' ids
         # Scales the starting noise; checks set 0 for deterministic drafts.
@@ -410,19 +426,26 @@ class FlashMapDraftModel(FlashMapDiT):
 
     @torch.no_grad()
     def prepare(self, lm_head_weight: torch.Tensor) -> None:
-        if self.draft_vocab_size and self._vocab_ranking is None:
+        state_vocab = bool(self.state_vocab_size and self.draft_vocab_size)
+        if state_vocab:  # the draft vocabulary the drafter was trained on
+            self.hot_ids = self.draft_ids.to(self.embedding.device)
+        elif self.draft_vocab_size and self._vocab_ranking is None:
             logger.warning(
                 "FlashMap: no draft_vocab.safetensors next to the weights; drafting "
                 "over the full vocabulary"
             )
             self.draft_vocab_size = 0
-        if self.draft_vocab_size:
+        elif self.draft_vocab_size:
             self.hot_ids = (
                 self._vocab_ranking[: self.draft_vocab_size]
                 .to(device=self.embedding.device, dtype=torch.int64)
                 .sort()
                 .values
             )
+        if state_vocab:
+            self.state_embedding = self.embedding[self.hot_ids]
+        else:
+            self.state_embedding, self.head_to_state = self.embedding, self.hot_ids
         self.folded_head = self._fold_lm_head(lm_head_weight, self.hot_ids)
         self.lm_head = _FoldedHead(*self.folded_head, self.vocab_size)
         self.markov_head.hot_ids = self.hot_ids
@@ -470,8 +493,12 @@ class FlashMapDraftModel(FlashMapDiT):
             weights[f"self_o{i}"] = (layer.self_attn.o_proj.weight, None)
             weights[f"cross_q{i}"] = (layer.cross_attn.q_proj.weight, None)
             weights[f"cross_o{i}"] = (layer.cross_attn.o_proj.weight, None)
-            weights[f"fc1_{i}"] = (layer.mlp.fc1.weight, layer.mlp.fc1.bias)
-            weights[f"fc2_{i}"] = (layer.mlp.fc2.weight, layer.mlp.fc2.bias)
+            if layer.mlp.mlp_type == "swiglu":
+                weights[f"gate_up{i}"] = (layer.mlp.gate_up_proj.weight, None)
+                weights[f"down{i}"] = (layer.mlp.down_proj.weight, None)
+            else:
+                weights[f"fc1_{i}"] = (layer.mlp.fc1.weight, layer.mlp.fc1.bias)
+                weights[f"fc2_{i}"] = (layer.mlp.fc2.weight, layer.mlp.fc2.bias)
         for key, (weight, bias) in weights.items():
             self._fp8[key] = (*quantize_weight_fp8(weight), bias)
 
@@ -508,10 +535,11 @@ class FlashMapDraftModel(FlashMapDiT):
         jump the AdaLN modulations ``(1 + scale, shift, gate)`` of every norm;
         the embedded starting state's constant (the uniform posterior's
         embedding); and, for one jump, what its noise is drawn with: the
-        Cholesky factor of ``E^T E``, or the folded path (``_folded_noise``)."""
+        Cholesky factor of ``E^T E``, or the folded path (``_folded_noise``).
+        ``E`` is the state vocabulary's rows of the embedding."""
         device = self.fc.weight.device
         per_jump = []
-        for start, end in zip(self.grid[:-1], self.grid[1:]):
+        for start, end, _ in self.jumps:
             # (scale, shift, gate) of every norm, from the reference model.
             layers, (scale, shift, _) = self.time_conditioning(start, end)
             modulations = [
@@ -522,10 +550,9 @@ class FlashMapDraftModel(FlashMapDiT):
                 for norms in layers
             ]
             per_jump.append((modulations, (1 + scale[0, 0], shift[0, 0])))
-        embedding = self.embedding
-        posterior = torch.full(
-            (1, self.vocab_size), 1.0 / self.vocab_size, device=device
-        ).to(embedding.dtype)
+        embedding = self.state_embedding
+        vocab = embedding.shape[0]
+        posterior = torch.full((1, vocab), 1.0 / vocab, device=device).to(embedding.dtype)
         uniform = self.state_norm(posterior @ embedding)[0]
         noise = None
         if self.num_steps == 1 and self.folded_noise:
@@ -536,14 +563,13 @@ class FlashMapDraftModel(FlashMapDiT):
         return per_jump, uniform, noise
 
     def _embedding_gram(self) -> torch.Tensor:
-        """``E^T E`` in float64 (``E`` the target's embedding), accumulated a
-        chunk of rows at a time."""
+        """``E^T E`` in float64 (``E`` the state vocabulary's rows of the
+        target's embedding), accumulated a chunk of rows at a time."""
         hidden = self.target_hidden_size
-        gram = torch.zeros(
-            hidden, hidden, dtype=torch.float64, device=self.embedding.device
-        )
-        for start in range(0, self.vocab_size, 8192):
-            part = self.embedding[start : start + 8192].double()
+        embedding = self.state_embedding
+        gram = torch.zeros(hidden, hidden, dtype=torch.float64, device=embedding.device)
+        for start in range(0, embedding.shape[0], 8192):
+            part = embedding[start : start + 8192].double()
             gram += part.T @ part
         return gram
 
@@ -564,7 +590,7 @@ class FlashMapDraftModel(FlashMapDiT):
         lam, basis = self.noise_basis()
         weight = self.noise_norm.weight.double()
         fold = (lam.sqrt()[:, None] * basis.T) * weight[None, :]
-        proj = (fold @ self.x_embed.weight.double().T).to(self.embedding.dtype)
+        proj = (fold @ self.x_embed.weight.double().T).to(self.state_embedding.dtype)
         variance = (lam / self.target_hidden_size).float()
         return variance, proj, self.x_embed(uniform)
 
@@ -631,6 +657,11 @@ class FlashMapDraftModel(FlashMapDiT):
         out_ids.copy_(ids)
         out_parents[:, 1 : ids.shape[1] + 1].copy_(ids)
         out_stats.copy_(stats)
+
+    def jump_gate(self, step: int) -> torch.Tensor:
+        """The noise term's weight at jump ``step``'s evaluation (``jumps``)."""
+        start, end, _ = self.jumps[step]
+        return self.noise_gate_at(start, end)
 
     def noise_gate_at(self, start: float, end: float) -> torch.Tensor:
         """The weight of the state's noise term for a jump from ``start`` to
@@ -904,7 +935,7 @@ class FlashMapDraftModel(FlashMapDiT):
                 device=block_positions.device,
                 dtype=noise.dtype,
             )
-            gate = self.noise_gate_at(self.grid[0], self.grid[1])
+            gate = self.jump_gate(0)
             embedded = uniform + gate * self.noise_norm(z @ noise)
             hidden = self._linear(
                 embedded, "x_embed", self.x_embed.weight, self.x_embed.bias
@@ -921,7 +952,7 @@ class FlashMapDraftModel(FlashMapDiT):
                 dtype=proj.dtype,
             )
             mean_square = (z.float().square() * variance).sum(-1, keepdim=True)
-            scale = self.noise_gate_at(self.grid[0], self.grid[1]) * torch.rsqrt(
+            scale = self.jump_gate(0) * torch.rsqrt(
                 mean_square + self.rms_norm_eps
             )
             hidden = embedded_uniform + (scale * (z @ proj).float()).to(proj.dtype)
@@ -945,7 +976,9 @@ class FlashMapDraftModel(FlashMapDiT):
             hidden = self._denoise(step, hidden, *attend).reshape(slots, -1)
             if step + 1 < self.num_steps:
                 logits = self.head_logits(hidden)
-                supports.append(top_predictions(logits, self.jump_topk, self.hot_ids))
+                supports.append(
+                    top_predictions(logits, self.jump_topk, self.head_to_state)
+                )
         return hidden
 
     def _denoise(
@@ -1011,9 +1044,15 @@ class FlashMapDraftModel(FlashMapDiT):
             )
             normed = F.layer_norm(hidden, (self.dim,), eps=eps) * m_scale + m_shift
             mlp = layer.mlp
-            normed = self._linear(normed, f"fc1_{i}", mlp.fc1.weight, mlp.fc1.bias)
-            normed = F.gelu(normed)
-            normed = self._linear(normed, f"fc2_{i}", mlp.fc2.weight, mlp.fc2.bias)
+            if mlp.mlp_type == "swiglu":
+                gate, up = self._linear(
+                    normed, f"gate_up{i}", mlp.gate_up_proj.weight
+                ).chunk(2, dim=-1)
+                normed = self._linear(F.silu(gate) * up, f"down{i}", mlp.down_proj.weight)
+            else:
+                normed = self._linear(normed, f"fc1_{i}", mlp.fc1.weight, mlp.fc1.bias)
+                normed = F.gelu(normed)
+                normed = self._linear(normed, f"fc2_{i}", mlp.fc2.weight, mlp.fc2.bias)
             hidden = hidden + m_gate * normed
         return F.layer_norm(hidden, (self.dim,), eps=eps) * final_scale + final_shift
 

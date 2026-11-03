@@ -25,6 +25,11 @@ drawn in the embedding's eigenbasis (fold.py). Everything that depends only on
 the jump times (every AdaLN modulation) is computed once at load. More jumps
 run the reference algorithm exactly, with a vocabulary-sized state.
 
+A drafter trained on a draft vocabulary (``state_vocab_size``, its tokens in
+the checkpoint's ``draft_ids``) noises, embeds and predicts its state over
+those tokens: the constant, the noise fold, the multi-jump state and the head
+all use their rows of the target's embedding and LM head.
+
 Requirements: the V2 model runner, tensor parallel size 1, the FlashAttention
 backend and a bf16 KV cache (checked at load).
 
@@ -48,6 +53,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
+from flashmap.configuration_flashmap import jump_times
 from flashmap.vllm.fold import (
     fold_head,
     fold_noise,
@@ -68,7 +74,9 @@ try:
 except ImportError:  # no FlashAttention 3 build
     get_scheduler_metadata = None
 
-logger = init_logger(__name__)
+# Under vLLM's logger, whose handler and level apply to it (a top-level
+# "flashmap" logger would print nothing).
+logger = init_logger(f"vllm.{__name__}")
 
 __all__ = ["FlashMapDraftModel", "FlashMapModel"]
 
@@ -172,10 +180,20 @@ class FlashMapAttention(nn.Module):
 
 
 class FlashMapMLP(nn.Module):
-    def __init__(self, dim: int, hidden: int):
+    """``fc1``/``fc2`` (GELU, with biases) or, for ``mlp_type`` "swiglu",
+    ``gate_up_proj`` (gate rows, then up rows) and ``down_proj``, without biases."""
+
+    def __init__(self, dim: int, hidden: int, mlp_type: str = "gelu"):
         super().__init__()
-        self.fc1 = nn.Linear(dim, hidden)
-        self.fc2 = nn.Linear(hidden, dim)
+        if mlp_type not in ("gelu", "swiglu"):
+            raise ValueError(f"FlashMap mlp_type must be gelu or swiglu, got {mlp_type!r}")
+        self.mlp_type = mlp_type
+        if mlp_type == "swiglu":
+            self.gate_up_proj = nn.Linear(dim, 2 * hidden, bias=False)
+            self.down_proj = nn.Linear(hidden, dim, bias=False)
+        else:
+            self.fc1 = nn.Linear(dim, hidden)
+            self.fc2 = nn.Linear(hidden, dim)
 
 
 class FlashMapLayer(nn.Module):
@@ -189,7 +207,9 @@ class FlashMapLayer(nn.Module):
         self.cross_attn_adaln = AdaLN(cond_dim, dim)
         self.cross_attn = FlashMapAttention(dim, heads, head_dim, config.qk_norm_eps)
         self.mlp_adaln = AdaLN(cond_dim, dim)
-        self.mlp = FlashMapMLP(dim, config.intermediate_size)
+        self.mlp = FlashMapMLP(
+            dim, config.intermediate_size, getattr(config, "mlp_type", None) or "gelu"
+        )
         # The cross-attention context lives in vLLM's paged KV cache; this layer
         # only owns the cache (the draft step reads it with its own kernels).
         self.cross_attn.attn = Attention(
@@ -261,14 +281,22 @@ class FlashMapDraftModel(nn.Module):
         # FLASHMAP_NUM_STEPS overrides the checkpoint's number of jumps.
         self.num_steps = int(os.environ.get("FLASHMAP_NUM_STEPS", config.num_steps))
         self.time_grid = [float(t) for t in config.time_grids[self.num_steps - 1]]
+        # Per jump (s, t, next): the map's evaluation delta_{s,t} and the time the
+        # state moves to.
+        self.jumps = jump_times(self.time_grid)
         start = vllm_config.model_config.get_total_num_hidden_layers()
         self.model = FlashMapModel(
             config, vllm_config, f"{prefix}.model" if prefix else "model", start
         )
-        # Draft vocabulary: a restricted head drafts over d2t's tokens only.
+        # Draft vocabulary: a restricted head drafts over d2t's tokens only. A
+        # drafter trained on one (state_vocab_size) also lives on it: its state
+        # is noised and embedded over those tokens, which it lists (draft_ids).
         self.vocab_size = int(config.vocab_size)
+        self.state_vocab_size = getattr(config, "state_vocab_size", None)
         draft_vocab_size = int(
-            getattr(config, "draft_vocab_size", None) or self.vocab_size
+            self.state_vocab_size
+            or getattr(config, "draft_vocab_size", None)
+            or self.vocab_size
         )
         self.d2t: nn.Parameter | None = None
         if draft_vocab_size != self.vocab_size:
@@ -297,11 +325,23 @@ class FlashMapDraftModel(nn.Module):
         for checkpoint_name, tensor in weights:
             if checkpoint_name in ("embed_tokens.weight", "lm_head.weight", "t2d"):
                 continue  # the target's own, shared at load
+            if checkpoint_name == "draft_ids":
+                # The draft vocabulary a drafter was trained on, in id order.
+                if self.d2t is not None:
+                    size = self.d2t.shape[0]
+                    ids = tensor.to(torch.int64)
+                    self.d2t.data.copy_(ids - torch.arange(size, device=ids.device))
+                    loaded.add("d2t")
+                continue
             if checkpoint_name in ("ids", "counts"):
                 # A release folder's draft_vocab.safetensors: the target's
                 # tokens, most frequent first; the draft head keeps the first
-                # draft_vocab_size of them.
-                if checkpoint_name == "ids" and self.d2t is not None:
+                # draft_vocab_size of them (a drafter's own draft_ids rule).
+                if (
+                    checkpoint_name == "ids"
+                    and self.d2t is not None
+                    and not self.state_vocab_size
+                ):
                     size = self.d2t.shape[0]
                     hot = tensor[:size].to(torch.int64).sort().values
                     self.d2t.data.copy_(hot - torch.arange(size, device=hot.device))
@@ -342,13 +382,13 @@ class FlashMapDraftModel(nn.Module):
         self.softmax_scale = self.head_dim**-0.5
         self._check_attention()
 
-        # AdaLN modulations for each jump (s, t) of the grid.
+        # AdaLN modulations for each jump's evaluation (s, t).
         self.modulations, self.final_modulations = [], []
-        grid = torch.tensor(self.time_grid, device=device, dtype=torch.float32)
         scale = float(self.config.time_scale)
-        for step in range(self.num_steps):
-            cond = model.time_embed(grid[step : step + 1] * scale) + model.jump_embed(
-                grid[step + 1 : step + 2] * scale
+        for start, end, _ in self.jumps:
+            times = torch.tensor([start, end], device=device, dtype=torch.float32)
+            cond = model.time_embed(times[:1] * scale) + model.jump_embed(
+                times[1:] * scale
             )
             per_layer = []
             for layer in self.layers:
@@ -369,21 +409,30 @@ class FlashMapDraftModel(nn.Module):
             )
         gate = model.noise_gate.float()
         if self.config.noise_gate == "jump":
-            self.noise_gates = [
-                float(gate * (grid[s + 1] - grid[s])) for s in range(self.num_steps)
-            ]
+            self.noise_gates = [float(gate * (end - start)) for start, end, _ in self.jumps]
         else:
             self.noise_gates = [float(gate)] * self.num_steps
 
+        self.hot_ids = None
+        if self.d2t is not None:
+            self.hot_ids = torch.arange(self.d2t.shape[0], device=device) + self.d2t
+        # The rows of the embedding the state is read through: all of them, or
+        # the draft vocabulary's for a drafter trained on it.
+        state_vocab = self.state_vocab_size is not None and self.hot_ids is not None
+        state_embed = embed_tokens[self.hot_ids] if state_vocab else embed_tokens
+
         # embed_state at t = 0: the uniform posterior's embedding (bf16, as the
         # reference forms softmax(0) @ E) through state_norm.
-        vocab = embed_tokens.shape[0]
+        vocab = state_embed.shape[0]
         uniform = torch.full((1, vocab), 1.0 / vocab, device=device, dtype=dtype)
-        self.first_hidden = model.x_embed(model.state_norm(uniform @ embed_tokens))[0]
+        posterior_term = model.state_norm(uniform @ state_embed)
+        self.first_hidden = model.x_embed(posterior_term)[0]
         self.noise_embed, self.noise_eigvals = fold_noise(
-            embed_tokens, model.noise_norm.weight, model.x_embed.weight
+            state_embed, model.noise_norm.weight, model.x_embed.weight
         )
-        self.embed_weight = embed_tokens
+        self.embed_weight = embed_tokens  # the anchors'
+        # More jumps read vocabulary-sized states through it.
+        self.state_weight = state_embed if self.num_steps > 1 else None
 
         # Context keys/values of every layer in one GEMM; self-attention
         # queries, keys and values in one GEMM per layer.
@@ -428,19 +477,16 @@ class FlashMapDraftModel(nn.Module):
         )
 
         # The DiT head folded into the LM head (no nonlinearity between them).
-        self.hot_ids = None
-        if self.d2t is not None:
-            self.hot_ids = torch.arange(self.d2t.shape[0], device=device) + self.d2t
         head = model.head
         self.head_weight, self.head_bias = fold_head(
             lm_head, head.weight, head.bias, self.hot_ids
         )
         self.jump_head = None
         if self.num_steps > 1:
-            # Between jumps the state mixes in a full-vocabulary distribution.
+            # Between jumps the state mixes in a distribution over its vocabulary.
             self.jump_head = (
                 (self.head_weight, self.head_bias)
-                if self.hot_ids is None
+                if self.hot_ids is None or state_vocab
                 else fold_head(lm_head, head.weight, head.bias)
             )
         self._prologue_fn = self._prologue
@@ -458,10 +504,12 @@ class FlashMapDraftModel(nn.Module):
             self._quantize_weights()
         torch.cuda.empty_cache()
         logger.info(
-            "FlashMap draft: %d jump(s) on grid %s, draft vocabulary %d",
+            "FlashMap draft: %d jump(s) on grid %s, draft vocabulary %d, "
+            "state vocabulary %d",
             self.num_steps,
             self.time_grid,
             self.head_weight.shape[0],
+            vocab,
         )
 
     def _quantize_weights(self) -> None:
@@ -480,8 +528,12 @@ class FlashMapDraftModel(nn.Module):
             weights[f"self_o.{i}"] = layer.self_attn.o_proj.weight
             weights[f"cross_q.{i}"] = layer.cross_attn.q_proj.weight
             weights[f"cross_o.{i}"] = layer.cross_attn.o_proj.weight
-            weights[f"fc1.{i}"] = layer.mlp.fc1.weight
-            weights[f"fc2.{i}"] = layer.mlp.fc2.weight
+            if layer.mlp.mlp_type == "swiglu":
+                weights[f"gate_up.{i}"] = layer.mlp.gate_up_proj.weight
+                weights[f"down.{i}"] = layer.mlp.down_proj.weight
+            else:
+                weights[f"fc1.{i}"] = layer.mlp.fc1.weight
+                weights[f"fc2.{i}"] = layer.mlp.fc2.weight
         fp8 = current_platform.fp8_dtype()
         self.fp8_linears = {
             name: quantize_fp8_per_channel(weight, fp8)
@@ -744,17 +796,23 @@ class FlashMapDraftModel(nn.Module):
             )
 
             normed = F.layer_norm(hidden, (dim,), eps=eps) * mods[6] + mods[7]
-            mlp = layer.mlp
-            hidden = hidden + mods[8] * self._lin(
-                F.gelu(
-                    self._lin(normed, f"fc1.{layer_id}", mlp.fc1.weight, mlp.fc1.bias)
-                ),
-                f"fc2.{layer_id}",
-                mlp.fc2.weight,
-                mlp.fc2.bias,
-            )
+            hidden = hidden + mods[8] * self._mlp(normed, layer_id, layer.mlp)
         normed = F.layer_norm(hidden, (dim,), eps=eps)
         return normed * final_modulations[0] + final_modulations[1]
+
+    def _mlp(self, x: torch.Tensor, layer_id: int, mlp: FlashMapMLP) -> torch.Tensor:
+        """The DiT block's MLP (GELU or SwiGLU), through ``_lin``."""
+        if mlp.mlp_type == "swiglu":
+            gate, up = self._lin(
+                x, f"gate_up.{layer_id}", mlp.gate_up_proj.weight
+            ).chunk(2, dim=-1)
+            return self._lin(F.silu(gate) * up, f"down.{layer_id}", mlp.down_proj.weight)
+        return self._lin(
+            F.gelu(self._lin(x, f"fc1.{layer_id}", mlp.fc1.weight, mlp.fc1.bias)),
+            f"fc2.{layer_id}",
+            mlp.fc2.weight,
+            mlp.fc2.bias,
+        )
 
     def _one_jump(
         self,
@@ -784,15 +842,14 @@ class FlashMapDraftModel(nn.Module):
     def _embed_state(self, state: torch.Tensor, step: int) -> torch.Tensor:
         """``x_embed(embed_state(state, s, t))`` of a vocabulary-sized float32
         ``state`` at jump ``step``, as the reference computes it."""
-        model, weight = self.model, self.embed_weight
+        model, weight = self.model, self.state_weight
         start = self.time_grid[step]
         evidence = start / max(1.0 - start, 1e-3) ** 2
         posterior = (state * evidence).softmax(dim=-1)
         both = torch.cat([posterior, state]).to(weight.dtype) @ weight
         posterior_emb, state_emb = both.split(state.shape[0])
-        embedded = model.state_norm(posterior_emb) + (
-            self.noise_gates[step] * model.noise_norm(state_emb)
-        ).to(weight.dtype)
+        embedded = (self.noise_gates[step] * model.noise_norm(state_emb)).to(weight.dtype)
+        embedded = model.state_norm(posterior_emb) + embedded
         return model.x_embed(embedded)
 
     def _noise(self, positions: torch.Tensor, n_cols: int) -> torch.Tensor:
@@ -858,8 +915,9 @@ class FlashMapDraftModel(nn.Module):
             z = self._noise(positions, self.noise_embed.shape[1])
             return self._one_jump_fn(z, positions, kv_caches, attention)
 
-        # Several jumps (Algorithm 8): x <- X_{t_n, t_n+1}(x) between jumps.
-        state = self._noise(positions, self.vocab_size)
+        # Several jumps (Algorithm 8): the state moves to the next grid time
+        # between them (jump_times).
+        state = self._noise(positions, self.state_weight.shape[0])
         for step in range(self.num_steps):
             hidden = self._dit_fn(
                 self._embed_state(state, step),
@@ -872,7 +930,7 @@ class FlashMapDraftModel(nn.Module):
             if step + 1 < self.num_steps:
                 weight, bias = self.jump_head
                 delta = F.linear(hidden, weight, bias).float().softmax(dim=-1)
-                start, end = self.time_grid[step], self.time_grid[step + 1]
+                start, _, end = self.jumps[step]
                 state = ((1.0 - end) * state + (end - start) * delta) / (1.0 - start)
         return hidden
 

@@ -251,21 +251,24 @@ def _write_context_kv_kernel(
     FP8: tl.constexpr,
     H: tl.constexpr,
     D: tl.constexpr,
+    H_POW2: tl.constexpr,
 ):
-    # One program per (token, layer); all heads at once.
+    # One program per (token, layer); all heads at once, the head axis padded
+    # to a power of two (a 2560-wide DiT has 20 heads) and masked.
     token = tl.program_id(0).to(tl.int64)
     layer = tl.program_id(1)
     slot = tl.load(slot_ptr + token).to(tl.int64)
     if slot < 0:
         return
     HALF: tl.constexpr = D // 2
-    h = tl.arange(0, H)[:, None]
+    h = tl.arange(0, H_POW2)[:, None]
+    head = h < H
     i = tl.arange(0, HALF)[None, :]
     d = tl.arange(0, D)[None, :]
     k_row = kv_ptr + (token * L + layer) * (2 * H * D) + h * D
     v_row = k_row + H * D
-    even = tl.load(k_row + 2 * i).to(tl.float32)
-    odd = tl.load(k_row + 2 * i + 1).to(tl.float32)
+    even = tl.load(k_row + 2 * i, mask=head, other=0.0).to(tl.float32)
+    odd = tl.load(k_row + 2 * i + 1, mask=head, other=0.0).to(tl.float32)
     rms = tl.rsqrt((tl.sum(even * even, 1) + tl.sum(odd * odd, 1)) / D + eps)[:, None]
     w_even = tl.load(k_norm_ptr + layer * D + 2 * i).to(tl.float32)
     w_odd = tl.load(k_norm_ptr + layer * D + 2 * i + 1).to(tl.float32)
@@ -279,7 +282,7 @@ def _write_context_kv_kernel(
 
     key_out = even * cos - odd * sin
     key_odd_out = odd * cos + even * sin
-    values = tl.load(v_row + d)
+    values = tl.load(v_row + d, mask=head, other=0.0)
     if FP8:
         # e4m3 with per-tensor scales, as vLLM's fp8 KV caches store them.
         k_scale = tl.load(scales_ptr + layer * 2)
@@ -294,9 +297,9 @@ def _write_context_kv_kernel(
         key_odd_out = key_odd_out.to(tl.bfloat16)
     dst = cache + (slot // block_size) * stride_block + h * stride_head
     dst += (slot % block_size) * stride_token
-    tl.store(dst + 2 * i, key_out)
-    tl.store(dst + 2 * i + 1, key_odd_out)
-    tl.store(dst + v_offset + d, values)
+    tl.store(dst + 2 * i, key_out, mask=head)
+    tl.store(dst + 2 * i + 1, key_odd_out, mask=head)
+    tl.store(dst + v_offset + d, values, mask=head)
 
 
 def write_context_kv(
@@ -342,13 +345,14 @@ def write_context_kv(
         FP8=scales is not None,
         H=heads,
         D=head_dim,
+        H_POW2=triton.next_power_of_2(heads),
     )
 
 
 @triton.jit
 def _seeded_normal_kernel(
     seeds_ptr,  # (max_num_reqs,) int64
-    rows_ptr,  # (rows,) int32 request-state index per row; negative = unseeded
+    rows_ptr,  # (rows,) int32/int64 request-state index per row; negative = unseeded
     pos_ptr,  # (rows,)
     out_ptr,  # (rows, n_cols) float32
     n_cols,

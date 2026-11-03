@@ -5,7 +5,9 @@ Three kinds of checkpoint are recognized by their config.json:
 * DeepSpec format: checkpoints of the original research code (not public), built on
   DeepSpec, where the released drafters were trained. They have their own weight names,
   RMSNorm scales stored as ``scale`` for ``1 + scale``, fused key/value projections, and
-  frozen copies of the target's embedding and lm_head.
+  frozen copies of the target's embedding and lm_head. One trained on a draft
+  vocabulary (``draft_vocab_size``) carries its token ids as ``draft_ids``, which the
+  release keeps (its ``state_vocab_size``).
 * speculators (vLLM's training library): FlashMap's weight names, a speculators
   config (``speculators_model_type: "flashmap"``), and optionally ``d2t``/``t2d``
   draft-vocabulary maps, which the standalone model does not use.
@@ -19,7 +21,8 @@ The output folder holds config.json, model.safetensors (bf16, without the target
 embedding and lm_head), the model code (so that `AutoModel.from_pretrained(...,
 trust_remote_code=True)` works) and, optionally, the model card as README.md and
 draft_vocab.safetensors, the target's token-frequency ranking that serving
-integrations use to restrict the draft vocabulary. The saved weights are checked
+integrations use to restrict the draft vocabulary of a drafter trained on the whole
+vocabulary (one trained on a draft vocabulary drafts over its own ``draft_ids``). The saved weights are checked
 against the source and against the names and shapes the model expects.
 
 config.json also carries the fields with which vLLM and sglang serve the folder as
@@ -62,7 +65,7 @@ def rename(name: str) -> str | None:
     """The FlashMap name of a DeepSpec weight (None: split or dropped)."""
     if name in NORMS:
         return NORMS[name]
-    if name.startswith(("fc.", "anchor_proj.")) or name == "noise_gate":
+    if name.startswith(("fc.", "anchor_proj.")) or name in ("noise_gate", "draft_ids"):
         return name
     if not name.startswith("denoiser."):
         return None
@@ -88,6 +91,9 @@ def rename(name: str) -> str | None:
         ("adaln_mlp.cond_proj.1.", "mlp_adaln.linear."),
         ("mlp.0.", "mlp.fc1."),
         ("mlp.3.", "mlp.fc2."),
+        # dit_mlp_type "swiglu": w13 holds the gate rows, then the up rows
+        ("mlp.w13.", "mlp.gate_up_proj."),
+        ("mlp.w2.", "mlp.down_proj."),
     ):
         if rest.startswith(old):
             return prefix + new + rest[len(old):]
@@ -137,6 +143,12 @@ def decoding_error_grids(vocab_size: int, max_steps: int = 4) -> dict:
     tau = ((error0 - error) / error0).clamp(0.0, 1.0)
     tau[0], tau[-1] = 0.0, 1.0
     tau = torch.cummax(tau, dim=0).values
+    return grids_from_tau(t, tau, max_steps)
+
+
+def grids_from_tau(t: torch.Tensor, tau: torch.Tensor, max_steps: int) -> dict:
+    """``t(n / N)`` for N = 1 .. max_steps by DeepSpec's piecewise-linear inverse of
+    the table ``tau(t)``."""
     grids = {}
     for steps in range(1, max_steps + 1):
         x = torch.linspace(0.0, 1.0, steps + 1, dtype=torch.float64)
@@ -154,15 +166,18 @@ def from_deepspec(source: dict, target_model: str | None) -> dict:
         raise ValueError("only DeepSpec flow maps (posterior_noise featurization, decoding_error schedule) convert")
     if not target_model:
         raise ValueError("a DeepSpec config does not name its target: pass --target-model")
+    # the vocabulary the flow lives on, whose size the time schedule depends on
+    state_vocab_size = int(source.get("draft_vocab_size") or 0) or None
     return dict(
         target_model=target_model,
         vocab_size=int(source["vocab_size"]),
+        state_vocab_size=state_vocab_size,
         target_layer_ids=[int(i) for i in source["target_layer_ids"]],
         block_size=int(source["block_size"]),
         time_scale=float(source.get("dit_time_scale", 1000.0)),
         rope_theta=float(source.get("dit_rope_base", 10000.0)),  # its rope_theta is the target's
         noise_gate=source.get("noise_gate", "constant"),
-        jump_grids=decoding_error_grids(int(source["vocab_size"])),
+        jump_grids=decoding_error_grids(state_vocab_size or int(source["vocab_size"])),
     )
 
 
@@ -205,7 +220,8 @@ def from_flashmap(source: dict, target_model: str | None) -> dict:
 
 # ---- serving ------------------------------------------------------------------------
 
-# vLLM drafts over the first DRAFT_VOCAB_SIZE ids of draft_vocab.safetensors, when shipped.
+# vLLM drafts over the first DRAFT_VOCAB_SIZE ids of draft_vocab.safetensors, when shipped
+# with a drafter trained on the whole vocabulary.
 DRAFT_VOCAB_SIZE = 65536
 
 
@@ -213,7 +229,8 @@ def vllm_fields(block_size: int, target_model: str, target_architectures: list, 
     """config.json fields for vLLM: a speculators-style header (vLLM's format for draft
     models, which flashmap's vLLM plugin maps onto the fields above; the DiT's dimensions
     stay where they are, so its `transformer_layer_config` is empty) and the size of the
-    restricted draft vocabulary, if any."""
+    restricted draft vocabulary, if any (a drafter's state vocabulary, or the shipped
+    ranking's top DRAFT_VOCAB_SIZE)."""
     fields = {
         "speculators_model_type": "flashmap",
         "speculators_config": {
@@ -231,7 +248,8 @@ def vllm_fields(block_size: int, target_model: str, target_architectures: list, 
     return fields
 
 
-# Positions a served draft accepts: Qwen3's context with YaRN (and vLLM's default).
+# Positions a served draft accepts at least: Qwen3's context with YaRN (and vLLM's
+# default); a target with a longer native context raises it to the target's.
 MAX_POSITION_EMBEDDINGS = 131072
 
 
@@ -241,8 +259,10 @@ def sglang_fields(target_model: str, vocab_size: int) -> dict:
     draft's) and, under `dspark_config`, DSPARK's own fields: a rank-1 "vanilla" Markov
     head, which flashmap.sglang replaces by an identity (FlashMap has none), and the
     token DSPARK fills the block's slots with, which FlashMap never reads."""
+    target = target_config(target_model)
+    target = target.get("text_config") or target
     return {
-        "max_position_embeddings": MAX_POSITION_EMBEDDINGS,
+        "max_position_embeddings": max(MAX_POSITION_EMBEDDINGS, int(target.get("max_position_embeddings") or 0)),
         "dspark_config": {
             "markov_rank": 1,
             "markov_head_type": "vanilla",
@@ -265,15 +285,20 @@ def mask_token_id(target_model: str, vocab_size: int) -> int:
     return vocab_size - 1
 
 
-def target_architectures(target_model: str) -> list:
-    """The target's architectures from its config.json, or [] if it is not reachable
-    (vLLM reads only the target's name)."""
+def target_config(target_model: str) -> dict:
+    """The target's config.json, or {} if it is not reachable."""
     try:
         from transformers import PretrainedConfig
 
-        return PretrainedConfig.get_config_dict(target_model)[0].get("architectures") or []
+        return PretrainedConfig.get_config_dict(target_model)[0]
     except Exception:  # noqa: BLE001
-        return []
+        return {}
+
+
+def target_architectures(target_model: str) -> list:
+    """The target's architectures from its config.json, or [] if it is not reachable
+    (vLLM reads only the target's name)."""
+    return target_config(target_model).get("architectures") or []
 
 
 # ---- all ----------------------------------------------------------------------------
@@ -283,12 +308,16 @@ def architecture(weights: dict) -> dict:
     """The sizes of the network, read off its weights."""
     hidden_size, target_hidden_size = weights["x_embed.weight"].shape
     cond_dim, time_embed_dim = weights["time_embed.linear_1.weight"].shape
+    if "layers.0.mlp.gate_up_proj.weight" in weights:
+        mlp = dict(mlp_type="swiglu", intermediate_size=weights["layers.0.mlp.gate_up_proj.weight"].shape[0] // 2)
+    else:
+        mlp = dict(mlp_type="gelu", intermediate_size=weights["layers.0.mlp.fc1.weight"].shape[0])
     return dict(
         target_hidden_size=target_hidden_size,
         hidden_size=hidden_size,
         num_hidden_layers=1 + max(int(name.split(".")[1]) for name in weights if name.startswith("layers.")),
         num_attention_heads=hidden_size // weights["layers.0.self_attn.q_norm.weight"].shape[0],
-        intermediate_size=weights["layers.0.mlp.fc1.weight"].shape[0],
+        **mlp,
         cond_dim=cond_dim,
         time_embed_dim=time_embed_dim,
     )
@@ -339,7 +368,9 @@ def convert(checkpoint, output, target_model=None, model_card=None, draft_vocab=
         "AutoModel": "modeling_flashmap.FlashMapDraftModel",
     }
     check_weights(config, weights)
-    vocab_size = None
+    vocab_size = config.state_vocab_size
+    if vocab_size is not None and draft_vocab:
+        raise ValueError("this drafter was trained on a draft vocabulary (its draft_ids); --draft-vocab does not apply")
     if draft_vocab:
         with safe_open(draft_vocab, "pt") as handle:
             vocab_size = min(DRAFT_VOCAB_SIZE, handle.get_slice("ids").get_shape()[0])

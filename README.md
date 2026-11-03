@@ -13,6 +13,11 @@ the [SGLang](#serve-with-sglang) or [vLLM](#serve-with-vllm) integration.
 |---|---|---|
 | [j-shen/FlashMap-Qwen3-8B](https://huggingface.co/j-shen/FlashMap-Qwen3-8B) | [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) | 500M |
 | [j-shen/FlashMap-Qwen3-4B](https://huggingface.co/j-shen/FlashMap-Qwen3-4B) | [Qwen/Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) | 475M |
+| [j-shen/FlashMap-Qwen3.8-27B-FP8](https://huggingface.co/j-shen/FlashMap-Qwen3.8-27B-FP8) | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | 770M |
+
+The Qwen3.8 drafter drafts over a draft vocabulary (below) and is served with vLLM or SGLang only: the `transformers`
+implementation undoes rejected drafts by cropping the target's cache, which Qwen3.8's linear-attention layers do not
+support, and `spec_generate` refuses such targets.
 
 ## Install
 
@@ -73,15 +78,22 @@ The vLLM integration is a plugin in this package (the `vllm` extra), which vLLM 
 ```bash
 uv venv --python 3.12 .venv-vllm
 source .venv-vllm/bin/activate
-uv pip install "vllm==0.31.*" "flashmap[vllm]"
+uv pip install "vllm==0.32.*" "flashmap[vllm]"
 
 vllm serve Qwen/Qwen3-8B --speculative-config '{"model": "j-shen/FlashMap-Qwen3-8B", "num_speculative_tokens": 16}'
 ```
 
-For sampling at `temperature > 0`, add `"draft_sample_method": "probabilistic"` to the speculative config.
+The plugin supports vLLM 0.31 and 0.32. For sampling at `temperature > 0`, add `"draft_sample_method": "probabilistic"`
+to the speculative config.
+
+Prefix caching works with both integrations: vLLM's (`--enable-prefix-caching`) and SGLang's radix cache, which is on
+by default. On a hybrid target such as Qwen3.8, vLLM caches in blocks sized to the target's linear-attention state (864
+tokens for Qwen3.8-27B-FP8 with its drafter) and, as for every drafter that reads the target's hidden states,
+recomputes the last cached block, so a shared prefix starts to be reused only after about two blocks.
 
 Drafters you train yourself ([Training](#training)) are served the same way once converted to the release
-format.
+format, including drafters whose DiT uses a SwiGLU MLP (`"mlp_type": "swiglu"` in `config.json`; the released
+drafters use GELU).
 
 ## Sending requests
 
@@ -110,6 +122,22 @@ sampler instead: `VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve ...`.
 **Solution:** SGLang starts DeepGEMM's compiler, which needs CUDA 12.9 or newer. Install it, or turn DeepGEMM off
 (it only runs FP8 matmuls): `SGLANG_DEEPGEMM_PDL=0 SGLANG_ENABLE_JIT_DEEPGEMM=0 sglang serve ...`.
 
+**Problem:** vLLM with an FP8 target (such as Qwen3.8-27B-FP8) fails at startup with `NVCC version must be at least
+12.9` or `NVCC compiler is not executable`.\
+**Solution:** vLLM compiles DeepGEMM's FP8 matmuls with `nvcc` 12.9 or newer. Install it, or use CUTLASS's FP8
+matmuls instead: `VLLM_USE_DEEP_GEMM=0 vllm serve ...`.
+
+**Problem:** vLLM with a hybrid target (Qwen3.5 architecture, such as Qwen3.8-27B) fails at startup with
+`max_num_seqs (1024) exceeds available Mamba cache blocks`.\
+**Solution:** Each running sequence holds one block of the target's linear-attention state. Lower `--max-num-seqs`
+(for example to 64) or raise `--gpu-memory-utilization`.
+
+**Problem:** vLLM with a hybrid target runs few requests at once with a drafter (about 12 for Qwen3.8-27B-FP8 on one
+H200 with 16 speculative tokens), so throughput stops growing with concurrency.\
+**Solution:** vLLM keeps a copy of the target's linear-attention state for every speculative token of every request,
+and pads all cache pages to the drafter's larger page. Lowering `"num_speculative_tokens"` in the speculative config
+(for example to 8; the drafter still drafts its whole block) cuts the copies, at some cost in tokens per verification.
+
 ## Training
 
 FlashMap is trained in two stages: a flow over one-hot token blocks, then a flow map distilled from it. The
@@ -119,6 +147,12 @@ and the SpecForge fork ([FlashMap](https://github.com/al-jshen/SpecForge/blob/fl
 Both write a trained map as a release folder for this package (`speculators convert --algorithm flashmap`,
 `specforge export --to hf`), and [`scripts/convert_checkpoint.py`](https://github.com/al-jshen/flashmap/blob/master/scripts/convert_checkpoint.py) converts
 speculators and SpecForge checkpoints too (`python scripts/convert_checkpoint.py --help`).
+
+A drafter can also be trained on a draft vocabulary: the target's most frequent tokens (65,536 of Qwen3.8's
+248,320), over which its flow lives, noise, posterior and predictions alike. Its release lists them as the
+`draft_ids` in its weights and sets `state_vocab_size` in its config (with jump grids computed at that size);
+the transformers model, vLLM and SGLang draft over those tokens only, and every other token gets draft
+probability 0, so speculative decoding stays lossless.
 
 ## License
 

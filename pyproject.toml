@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flashmap"
-version = "0.1.0"
+version = "0.2.0"
 description = "FlashMap: flow map speculative decoding for Hugging Face transformers"
 readme = "README.md"
 license = "MIT"
@@ -32,7 +32,7 @@ test = ["pytest"]
 # Serve FlashMap drafters in sglang (an sglang plugin, registered below).
 sglang = ["sglang==0.5.20"]
 # Serve FlashMap drafters in vLLM (a vLLM general plugin, registered below).
-vllm = ["vllm>=0.31,<0.32"]
+vllm = ["vllm>=0.31,<0.33"]
 
 [project.entry-points."sglang.srt.plugins"]
 flashmap = "flashmap.sglang:register"
@@ -47,6 +47,7 @@ Documentation = "https://github.com/al-jshen/flashmap#readme"
 Paper = "https://arxiv.org/abs/2610.24365"
 "Model (Qwen3-8B)" = "https://huggingface.co/j-shen/FlashMap-Qwen3-8B"
 "Model (Qwen3-4B)" = "https://huggingface.co/j-shen/FlashMap-Qwen3-4B"
+"Model (Qwen3.8-27B-FP8)" = "https://huggingface.co/j-shen/FlashMap-Qwen3.8-27B-FP8"
 
 [tool.setuptools]
 packages = ["flashmap", "flashmap.sglang", "flashmap.vllm"]

@@ -15,6 +15,8 @@ the first ``num_speculative_tokens`` slots, so verification, which dominates at
 high concurrency, checks fewer tokens.
 """
 
+import inspect
+
 import torch
 from torch import nn
 from vllm.config import VllmConfig
@@ -29,7 +31,9 @@ from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
 from flashmap.vllm.fold import split_argmax
 from flashmap.vllm.kernels import scatter_rows
 
-logger = init_logger(__name__)
+# Under vLLM's logger, whose handler and level apply to it (a top-level
+# "flashmap" logger would print nothing).
+logger = init_logger(f"vllm.{__name__}")
 
 __all__ = ["FlashMapSpeculator"]
 
@@ -62,19 +66,30 @@ class FlashMapSpeculator(DFlashSpeculator):
                 num_slots, dtype=torch.int64, device=device
             )
             self.sample_pos = torch.zeros(num_slots, dtype=torch.int64, device=device)
+            # int32 in vLLM 0.31, int64 from 0.32: keep the runtime's dtype.
             self.sample_idx_mapping = torch.full(
-                (num_slots,), -1, dtype=torch.int32, device=device
+                (num_slots,), -1, dtype=self.sample_idx_mapping.dtype, device=device
             )
             self.sample_col = torch.arange(
                 block_size, dtype=torch.int32, device=device
             ).repeat(self.max_num_reqs)
+        # vLLM 0.31's draft watermarker resamples gumbel_sample's draw
+        # (logits, sampled, idx_mapping, temperature); from 0.32 it samples in
+        # its place, with gumbel_sample's arguments.
+        self._watermark_resamples = (
+            self.draft_watermarker is not None
+            and "ordinary_sampled"
+            in inspect.signature(self.draft_watermarker.sample).parameters
+        )
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         # A restricted draft vocabulary writes only its own columns of the
         # cached proposal distribution; every other token has probability 0.
         dtype, fill = super().draft_logits_spec(vllm_config)
         hf_config = self.draft_model_config.hf_config
-        draft_vocab_size = getattr(hf_config, "draft_vocab_size", None)
+        draft_vocab_size = getattr(hf_config, "state_vocab_size", None) or getattr(
+            hf_config, "draft_vocab_size", None
+        )
         if draft_vocab_size and draft_vocab_size < hf_config.vocab_size:
             fill = float("-inf")
         return dtype, fill
@@ -155,6 +170,7 @@ class FlashMapSpeculator(DFlashSpeculator):
         seeds: torch.Tensor,
         draft_step: torch.Tensor,
         draft_logits: torch.Tensor | None,
+        spec_step_idx: int = 0,  # noqa: ARG002 (vLLM 0.32; one step drafts the block)
     ) -> torch.Tensor:
         block, verify = self.num_speculative_steps, self.num_verify
         if verify == block:
@@ -201,7 +217,10 @@ class FlashMapSpeculator(DFlashSpeculator):
         if draft_logits is None:
             sampled = split_argmax(logits)
         elif hot_ids is None:
-            sampled = gumbel_sample(
+            sample = gumbel_sample
+            if self.draft_watermarker is not None and not self._watermark_resamples:
+                sample = self.draft_watermarker.sample
+            sampled = sample(
                 logits,
                 idx_mapping,
                 temperature,
@@ -213,7 +232,7 @@ class FlashMapSpeculator(DFlashSpeculator):
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
-            if self.draft_watermarker is not None:
+            if self._watermark_resamples:
                 sampled = self.draft_watermarker.sample(
                     logits, sampled, idx_mapping, temperature
                 )

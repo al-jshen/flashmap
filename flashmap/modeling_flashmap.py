@@ -26,6 +26,12 @@ cross-attends to the target's hidden states at earlier positions (from a few of 
 layers) and to the anchor's embedding. Its output goes through the target's lm_head.
 The target's embedding and lm_head are not part of the drafter's weights.
 
+A drafter can live on a part of the vocabulary (``config.state_vocab_size``): ``V``
+is then the target's most frequent tokens, listed by the ``draft_ids`` buffer, and
+the state is read through, and the logits come from, those rows of the embedding
+and lm_head. Its drafts give every other token probability 0; rejection sampling
+against them stays exact.
+
 ``FlashMapDraftModel.spec_generate`` runs lossless speculative decoding with a
 transformers target model. This module is inference-only.
 """
@@ -41,7 +47,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import DynamicCache, PreTrainedModel
 
-from .configuration_flashmap import FlashMapConfig
+from .configuration_flashmap import FlashMapConfig, jump_times
 
 
 def rope_tables(positions: torch.Tensor, head_dim: int, theta: float) -> tuple[torch.Tensor, torch.Tensor]:
@@ -142,12 +148,24 @@ class FlashMapAttention(nn.Module):
 
 
 class FlashMapMLP(nn.Module):
+    """``fc2(gelu(fc1(x)))`` for ``mlp_type`` "gelu"; for "swiglu",
+    ``down_proj(silu(gate) * up)`` where ``gate_up_proj(x)`` holds the gate, then up."""
+
     def __init__(self, config: FlashMapConfig):
         super().__init__()
-        self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
-        self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.mlp_type = getattr(config, "mlp_type", "gelu")
+        dim, hidden = config.hidden_size, config.intermediate_size
+        if self.mlp_type == "swiglu":
+            self.gate_up_proj = nn.Linear(dim, 2 * hidden, bias=False)
+            self.down_proj = nn.Linear(hidden, dim, bias=False)
+        else:
+            self.fc1 = nn.Linear(dim, hidden)
+            self.fc2 = nn.Linear(hidden, dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.mlp_type == "swiglu":
+            gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
+            return self.down_proj(F.silu(gate) * up)
         return self.fc2(F.gelu(self.fc1(x)))
 
 
@@ -244,15 +262,19 @@ class FlashMapDraftModel(PreTrainedModel):
         self.layers = nn.ModuleList(FlashMapLayer(config) for _ in range(config.num_hidden_layers))
         self.final_adaln = FlashMapAdaLayerNorm(config)
         self.head = nn.Linear(dim, target_dim)
+        if getattr(config, "state_vocab_size", None) is not None:
+            # The state vocabulary's token ids, in id order (part of the weights).
+            self.register_buffer("draft_ids", torch.arange(config.state_vocab_size))
         self._clear_caches()
         self.post_init()
 
     # Values computed from the weights once and reused by every draft: the AdaLN
-    # modulations of each jump, and constants of the target's embedding. Moving or
-    # reloading the weights clears them.
+    # modulations of each jump, the state vocabulary's rows of the target's
+    # embedding and lm_head, and constants of that embedding. Moving or reloading
+    # the weights clears them.
 
     def _clear_caches(self) -> None:
-        self._time_cache, self._target_cache = {}, {}
+        self._time_cache, self._vocab_cache, self._target_cache = {}, {}, {}
 
     def _apply(self, fn, *args, **kwargs):
         self._clear_caches()
@@ -330,8 +352,32 @@ class FlashMapDraftModel(PreTrainedModel):
 
     # ---- drafting -----------------------------------------------------------------
 
+    @torch.no_grad()
+    def state_vocab(self, embed_tokens: nn.Module, lm_head: nn.Module):
+        """``(embedding, head weight, head bias)``: the rows of the target's embedding
+        and lm_head over the state vocabulary, all of them or ``draft_ids``' (copied
+        once)."""
+        embedding, weight, bias = embed_tokens.weight, lm_head.weight, getattr(lm_head, "bias", None)
+        if getattr(self.config, "state_vocab_size", None) is None:
+            return embedding, weight, bias
+        key = (embedding.data_ptr(), weight.data_ptr(), embedding.device, embedding.dtype)
+        if key not in self._vocab_cache:
+            ids = self.draft_ids.to(embedding.device)
+            rows = (embedding[ids], weight[ids], None if bias is None else bias[ids])
+            self._vocab_cache = {key: rows}
+        return self._vocab_cache[key]
+
+    def token_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        """Logits over the state vocabulary -> over the target's (``-inf`` outside it)."""
+        if getattr(self.config, "state_vocab_size", None) is None:
+            return logits
+        full = logits.new_full((*logits.shape[:-1], self.config.vocab_size), float("-inf"))
+        full[..., self.draft_ids.to(logits.device)] = logits
+        return full
+
     def embed_state(self, state, s: float, t: float, embedding: torch.Tensor) -> torch.Tensor:
-        """DiT input for a vocabulary-sized state ``(B, K, V)`` at time ``s`` jumping to ``t``.
+        """DiT input for a vocabulary-sized state ``(B, K, V)`` at time ``s`` jumping to
+        ``t``, with ``embedding`` the state vocabulary's rows of the target's.
 
         The state is read through the target's token embedding twice: as the posterior
         over clean tokens it implies, ``softmax(s x / (1 - s)^2)``, and linearly, weighted
@@ -349,8 +395,8 @@ class FlashMapDraftModel(PreTrainedModel):
         # the noise term's weight: noise_gate times the jump ("jump") or alone ("constant")
         jump = 1.0 if self.config.noise_gate == "constant" else t - s
         gate = (self.noise_gate.float() * jump).to(self.dtype)
-        posterior_term = self.state_norm(posterior_embeds.to(self.dtype))
-        return posterior_term + gate * self.noise_norm(state_embeds.to(self.dtype))
+        noise_term = gate * self.noise_norm(state_embeds.to(self.dtype))
+        return self.state_norm(posterior_embeds.to(self.dtype)) + noise_term
 
     @torch.no_grad()
     def target_constants(self, embedding: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -387,17 +433,20 @@ class FlashMapDraftModel(PreTrainedModel):
         """Draft logits ``(B, block_size, V)`` for the block after ``anchor_ids (B,)``.
 
         ``cache`` holds the target's features at every position before the anchor.
-        ``embed_tokens`` and ``lm_head`` are the target's. ``noise (B, block_size, V)``
-        is the starting state ``x0``; by default it is drawn, and a one-step draft draws
-        only its embedding (see ``target_constants``). Given the noise, the block's
-        tokens are independent draws from ``softmax(logits)``, one per slot."""
+        ``embed_tokens`` and ``lm_head`` are the target's. ``noise (B, block_size, S)``
+        (``S`` the state vocabulary's size) is the starting state ``x0``; by default it
+        is drawn, and a one-step draft draws only its embedding (see
+        ``target_constants``). Given the noise, the block's tokens are independent
+        draws from ``softmax(logits)``, one per slot; outside the state vocabulary the
+        logits are ``-inf``."""
         num_steps = num_steps or self.config.num_steps
         if str(num_steps) not in self.config.jump_grids:
             supported = ", ".join(sorted(self.config.jump_grids, key=int))
             raise ValueError(f"num_steps must be one of {supported} (the config's jump_grids), got {num_steps}")
         grid = self.config.jump_grids[str(num_steps)]
         batch_size, block_size = anchor_ids.shape[0], self.config.block_size
-        embedding, device = embed_tokens.weight, anchor_ids.device
+        device = anchor_ids.device
+        embedding, head_weight, head_bias = self.state_vocab(embed_tokens, lm_head)
 
         # The anchor's embedding enters the context at the anchor's position.
         anchor = cache.length
@@ -419,14 +468,15 @@ class FlashMapDraftModel(PreTrainedModel):
             shape = (batch_size, block_size, embedding.shape[0])
             state = torch.randn(shape, device=device, generator=generator)
 
-        for s, t in zip(grid[:-1], grid[1:]):
+        for s, t, nxt in jump_times(grid):
             if state is not None:
                 inputs = self.embed_state(state, s, t, embedding)
-            logits = lm_head(self(inputs, s, t, positions, context).to(lm_head.weight.dtype))
-            if t < 1.0:
-                # move to where the jump lands (eq. 19 of arXiv:2602.16813)
-                state = ((1.0 - t) * state + (t - s) * logits.float().softmax(dim=-1)) / (1.0 - s)
-        return logits
+            hidden = self(inputs, s, t, positions, context).to(head_weight.dtype)
+            logits = F.linear(hidden, head_weight, head_bias)
+            if nxt < 1.0:
+                # move to the next grid time (eq. 19 of arXiv:2602.16813)
+                state = ((1.0 - nxt) * state + (nxt - s) * logits.float().softmax(dim=-1)) / (1.0 - s)
+        return self.token_logits(logits)
 
     # ---- speculative decoding -----------------------------------------------------
 
@@ -446,6 +496,15 @@ class FlashMapDraftModel(PreTrainedModel):
             layers = config.num_hidden_layers
             raise ValueError(f"target_layer_ids {self.config.target_layer_ids} need more than {layers} target layers")
         name = (getattr(config, "_name_or_path", None) or "").rstrip("/")
+        # Rejected drafts are undone by cropping the target's cache, which a recurrent
+        # layer's state (linear attention, Mamba, convolutions) does not support.
+        croppable = ("full_attention", "sliding_attention", "chunked_attention")
+        recurrent = sorted({kind for kind in getattr(config, "layer_types", None) or () if kind not in croppable})
+        if recurrent:
+            raise ValueError(
+                f"spec_generate cannot decode {name or 'this target'} losslessly: its {', '.join(recurrent)} layers "
+                "keep a state that rejected drafts cannot be rolled back from; serve it with vLLM or SGLang"
+            )
         if name and name.split("/")[-1] != self.config.target_model.split("/")[-1]:
             warnings.warn(f"this drafter was trained for {self.config.target_model}, not {name}")
         devices = {self.device, embedding.device, lm_head.device}

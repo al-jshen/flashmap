@@ -83,21 +83,23 @@ def jump_coefficients(grid):
 
 
 def top_predictions(
-    logits: torch.Tensor, topk: int, hot_ids: Optional[torch.Tensor] = None
+    logits: torch.Tensor, topk: int, rows: Optional[torch.Tensor] = None
 ):
-    """A jump's prediction over ``logits``' vocabulary (all tokens, or the sorted
-    ``hot_ids`` the logits cover), cut to its ``topk``: ``(token ids, probs)``."""
+    """A jump's prediction over ``logits``' vocabulary, cut to its ``topk``:
+    ``(ids, probs)``, the ids the state's rows of the predicted tokens (``rows``
+    maps the logits' indices to them; None: the same indices)."""
     probs, index = logits.float().softmax(dim=-1).topk(topk, dim=-1)
-    return (index if hot_ids is None else hot_ids[index]), probs
+    return (index if rows is None else rows[index]), probs
 
 
 class JumpNoiseBank:
     """``size`` draws of a multi-jump draft's starting noise with what its jumps
     need from them over the whole vocabulary (see the module docstring).
 
-    ``draft`` is the sglang :class:`FlashMapDraftModel`; its ``embedding`` (the
-    target's token embedding), ``state_norm``/``noise_norm`` and
-    ``noise_gate_at`` are read."""
+    ``draft`` is the sglang :class:`FlashMapDraftModel`; its ``state_embedding``
+    (the state vocabulary's rows of the target's token embedding, which is the
+    vocabulary here), ``state_norm``/``noise_norm`` and ``jump_gate`` are
+    read."""
 
     def __init__(
         self,
@@ -109,7 +111,7 @@ class JumpNoiseBank:
         seed: int = 0,
         chunk: int = 128,
     ):
-        embedding = draft.embedding
+        embedding = draft.state_embedding
         device, dtype = embedding.device, embedding.dtype
         steps = len(grid) - 1
         self.grid = [float(t) for t in grid]
@@ -159,7 +161,7 @@ class JumpNoiseBank:
     def first_input(self, draft, rows: torch.Tensor, uniform: torch.Tensor):
         """The embedded starting state of slots ``rows`` at ``t = 0``: the
         uniform posterior's embedding ``uniform (H,)`` plus the gated noise."""
-        gate = draft.noise_gate_at(self.grid[0], self.grid[1])
+        gate = draft.jump_gate(0)
         out = uniform.expand(rows.numel(), -1)
         return out + gate * draft.noise_norm(self.noise_embed[rows])
 
@@ -167,7 +169,7 @@ class JumpNoiseBank:
         """The embedded state of jump ``n >= 1`` for slots ``rows (R,)``;
         ``supports``: per earlier prediction ``m``, its top tokens ``(ids (R, k),
         probs (R, k))``. Returns ``(R, H)`` in the embedding's dtype."""
-        embedding = draft.embedding
+        embedding = draft.state_embedding
         alpha, betas = self.coefficients[n]
         ids = torch.cat([ids for ids, _ in supports], dim=1)  # (R, L)
         # Each slot's contribution to the state x_n at its token: beta_nm delta_m.
@@ -195,7 +197,7 @@ class JumpNoiseBank:
             1.0 + weight.sum(dim=1, keepdim=True)
         )
         out = draft.state_norm(posterior.to(embedding.dtype))
-        gate = draft.noise_gate_at(self.grid[n], self.grid[n + 1])
+        gate = draft.jump_gate(n)
         noise = alpha * self.noise_embed[rows].float() + sums[:, 1]
         return out + gate * draft.noise_norm(noise.to(embedding.dtype))
 

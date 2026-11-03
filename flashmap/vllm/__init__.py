@@ -13,8 +13,8 @@ without patching its source:
   architecture the way vLLM chooses its DFlash2 speculator.
 
 Every hook delegates to vLLM's own code unless a FlashMap checkpoint is in use. The
-plugin supports vLLM 0.31.x; on other versions, or if registering fails, it logs a
-warning and leaves vLLM untouched.
+plugin supports vLLM 0.31.x and 0.32.x; on other versions, or if registering fails, it
+logs a warning and leaves vLLM untouched.
 
 Serve with ``vllm serve <target> --speculative-config '{"model": "<FlashMap folder or
 Hub id>", "num_speculative_tokens": 16}'``; the plugin fills in ``"method": "dflash"``.
@@ -32,12 +32,13 @@ logger = logging.getLogger(__name__)
 
 FLASHMAP_ARCHITECTURE = "FlashMapDraftModel"
 # vLLM (major, minor) versions whose internals the plugin hooks into.
-SUPPORTED_VLLM = ((0, 31),)
+SUPPORTED_VLLM = ((0, 31), (0, 32))
 
 # Speculators config fields the vLLM draft config carries over.
 _FLASHMAP_FIELDS = (
     "target_hidden_size",
     "draft_vocab_size",
+    "state_vocab_size",
     "block_size",
     "timestep_embed_dim",
     "timestep_frequency_dim",
@@ -48,6 +49,7 @@ _FLASHMAP_FIELDS = (
     "time_schedule",
     "num_steps",
     "time_grids",
+    "mlp_type",
 )
 
 
@@ -68,13 +70,18 @@ def release_config_fields(config_dict: dict) -> dict:
     (``model_type: "flashmap"``, served as it is): its DiT dimensions, the aux
     layers vLLM captures (DeepSpec's ``target_layer_ids`` + 1) and its field
     names mapped onto this plugin's."""
+    from flashmap.configuration_flashmap import FIXED_SETTINGS
+
+    for name, value in FIXED_SETTINGS.items():
+        if config_dict.get(name, value) != value:
+            raise ValueError(f"this version of flashmap serves only {name}={value!r}, not {config_dict[name]!r}")
     dim, heads = config_dict["hidden_size"], config_dict["num_attention_heads"]
     grids = config_dict.get("jump_grids") or {}
     fields = {key: config_dict[key] for key in _RELEASE_DIT_FIELDS}
     fields.update(
         num_key_value_heads=heads,
         head_dim=dim // heads,
-        hidden_act="gelu",
+        hidden_act="silu" if config_dict.get("mlp_type") == "swiglu" else "gelu",
         tie_word_embeddings=False,
         max_position_embeddings=config_dict.get("max_position_embeddings", 131072),
         rope_parameters={
@@ -132,7 +139,8 @@ def update_flashmap(config_dict: dict, pre_trained_config: dict) -> None:
 
 
 def _init_speculator(init_speculator):
-    def init_flashmap_or_other(vllm_config, device):
+    # vLLM 0.32 also passes the runner's request states (for its n-gram speculator).
+    def init_flashmap_or_other(vllm_config, device, *args, **kwargs):
         spec = vllm_config.speculative_config
         if (
             spec is not None
@@ -144,7 +152,7 @@ def _init_speculator(init_speculator):
             )
 
             return FlashMapSpeculator(vllm_config, device)
-        return init_speculator(vllm_config, device)
+        return init_speculator(vllm_config, device, *args, **kwargs)
 
     init_flashmap_or_other.flashmap = True  # type: ignore[attr-defined]
     return init_flashmap_or_other
