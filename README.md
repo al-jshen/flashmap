@@ -132,11 +132,14 @@ matmuls instead: `VLLM_USE_DEEP_GEMM=0 vllm serve ...`.
 **Solution:** Each running sequence holds one block of the target's linear-attention state. Lower `--max-num-seqs`
 (for example to 64) or raise `--gpu-memory-utilization`.
 
-**Problem:** vLLM with a hybrid target runs few requests at once with a drafter (about 12 for Qwen3.8-27B-FP8 on one
-H200 with 16 speculative tokens), so throughput stops growing with concurrency.\
-**Solution:** vLLM keeps a copy of the target's linear-attention state for every speculative token of every request,
-and pads all cache pages to the drafter's larger page. Lowering `"num_speculative_tokens"` in the speculative config
-(for example to 8; the drafter still drafts its whole block) cuts the copies, at some cost in tokens per verification.
+**Problem:** vLLM with a hybrid target runs far fewer requests at once with a drafter than without (with 16
+speculative tokens, about 11 requests of 8,192 tokens for Qwen3.8-27B-FP8 on one 80 GB H100), so throughput stops
+growing with concurrency.\
+**Solution:** vLLM keeps a copy of the target's linear-attention state for every speculative token of every request.
+Lowering `"num_speculative_tokens"` in the speculative config (for example to 8; the drafter still drafts its whole
+block) cuts the copies, at some cost in tokens per verification. Since 0.2.1 the plugin also stores the drafter's
+cache in pages of the target attention's size on hybrid targets, which fits about twice as many requests as 0.2.0 did
+(`FLASHMAP_CONTEXT_CACHE=layers` restores 0.2.0's layout).
 
 ## Training
 
