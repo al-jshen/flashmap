@@ -28,7 +28,7 @@ uv pip install flashmap
 ```
 
 The package needs only `torch` and `transformers>=4.56`; serving takes the `sglang` or `vllm` extra (below). It
-is tested with torch 2.9 and 2.13 and with transformers 4.57, 5.10, 5.16 and 5.20.
+is tested with torch 2.9 and 2.13 and with transformers 5.10, 5.12 and 5.19.
 
 ## Quickstart
 
@@ -94,6 +94,37 @@ recomputes the last cached block, so a shared prefix starts to be reused only af
 Drafters you train yourself ([Training](#training)) are served the same way once converted to the release
 format, including drafters whose DiT uses a SwiGLU MLP (`"mlp_type": "swiglu"` in `config.json`; the released
 drafters use GELU).
+
+## Serving Qwen3.8-27B-FP8
+
+The Qwen3.8 drafter serves the same way, from a fresh environment, on one GPU of 80 GB or more (tested on H100 and
+H200). With vLLM:
+
+```bash
+uv venv --python 3.12 .venv-vllm
+source .venv-vllm/bin/activate
+uv pip install "vllm==0.32.*" "flashmap[vllm]>=0.2.1"
+
+vllm serve Qwen/Qwen3.8-27B-FP8 --max-model-len 8192 --max-num-seqs 64 --enable-prefix-caching \
+  --speculative-config '{"model": "j-shen/FlashMap-Qwen3.8-27B-FP8", "num_speculative_tokens": 16, "draft_sample_method": "probabilistic"}'
+```
+
+With SGLang:
+
+```bash
+uv venv --python 3.12 .venv-sglang
+source .venv-sglang/bin/activate
+uv pip install "sglang==0.5.20" "flashmap[sglang]>=0.2.1"
+
+sglang serve --model-path Qwen/Qwen3.8-27B-FP8 --context-length 8192 \
+  --speculative-algorithm DSPARK --speculative-draft-model-path j-shen/FlashMap-Qwen3.8-27B-FP8
+```
+
+Qwen3.8 samples at temperature 1 by default, which is why vLLM needs `"draft_sample_method": "probabilistic"`. The
+drafter was trained with thinking disabled and drafts best that way (`"chat_template_kwargs": {"enable_thinking":
+false}` in a request, as [below](#sending-requests)). Without a CUDA toolkit of 12.9 or newer, prefix the commands with
+`VLLM_USE_DEEP_GEMM=0 VLLM_USE_FLASHINFER_SAMPLER=0` (vLLM) or `SGLANG_DEEPGEMM_PDL=0 SGLANG_ENABLE_JIT_DEEPGEMM=0`
+(SGLang); see [Troubleshooting](#troubleshooting), also for `--max-num-seqs` and concurrency on this hybrid target.
 
 ## Sending requests
 
